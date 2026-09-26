@@ -1,0 +1,29 @@
+{
+  "name": "screenshot-to-document",
+  "version": "1.0.0",
+  "description": "Upload screenshots, recognize the text in them, and get one neatly organized document (Word, PDF, HTML, Markdown, text).",
+  "scripts": {
+    "postinstall": "node scripts/vendor.js",
+    "start": "node scripts/serve.js",
+    "test": "node --test test/unit/*.test.js",
+    "test:e2e": "node --test test/e2e/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/accessgirl/cleanout-helper.git"
+  },
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/accessgirl/cleanout-helper/issues"
+  },
+  "homepage": "https://github.com/accessgirl/cleanout-helper#readme",
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "docx": "^9.7.2",
+    "tesseract.js": "7.0.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  }
+}

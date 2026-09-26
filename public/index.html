@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Screenshot to Document</title>
+  <meta name="description" content="Upload screenshots, read the text in them, and get a neatly organized document.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect x='8' y='4' width='40' height='52' rx='6' fill='%232563eb'/%3E%3Crect x='16' y='16' width='24' height='4' rx='2' fill='white'/%3E%3Crect x='16' y='26' width='24' height='4' rx='2' fill='white'/%3E%3Crect x='16' y='36' width='16' height='4' rx='2' fill='white'/%3E%3Ccircle cx='46' cy='46' r='12' fill='%2310b981'/%3E%3Cpath d='M40 46l4 4 8-8' stroke='white' stroke-width='3' fill='none'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="wrap">
+      <h1>Screenshot&nbsp;to&nbsp;Document</h1>
+      <p class="tagline">Add your screenshots. The app reads the text in them and puts it into one organized document you can download.</p>
+      <p class="privacy">🔒 Everything runs in your browser. Your screenshots are not uploaded anywhere.</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- STEP 1 -->
+    <section class="card" id="step-upload" aria-labelledby="h-upload">
+      <h2 id="h-upload"><span class="step">1</span> Add screenshots</h2>
+      <label class="dropzone" id="dropzone" tabindex="0">
+        <input type="file" id="file-input" accept="image/*" multiple hidden>
+        <span class="dz-icon" aria-hidden="true">🖼️</span>
+        <span class="dz-main">Drag &amp; drop screenshots here, or <u>click to choose files</u></span>
+        <span class="dz-sub">You can also paste an image (Ctrl/⌘ + V). PNG, JPG, WEBP, GIF and BMP work.</span>
+      </label>
+
+      <div class="list-toolbar" id="list-toolbar" hidden>
+        <span id="count-label">0 screenshots</span>
+        <span class="spacer"></span>
+        <button type="button" class="btn small ghost" id="sort-name">Sort by name</button>
+        <button type="button" class="btn small ghost" id="clear-all">Remove all</button>
+      </div>
+      <p class="hint" id="order-hint" hidden>Tip: the order here is the order in the document. Drag cards or use the arrows to rearrange.</p>
+      <ol class="thumbs" id="thumbs" aria-label="Screenshots"></ol>
+    </section>
+
+    <!-- STEP 2 -->
+    <section class="card" id="step-options" aria-labelledby="h-options">
+      <h2 id="h-options"><span class="step">2</span> Choose options</h2>
+      <div class="options">
+        <label class="field">
+          <span>Document title</span>
+          <input type="text" id="opt-title" placeholder="Leave blank to pick one automatically">
+        </label>
+        <label class="field">
+          <span>Organize the document</span>
+          <select id="opt-layout">
+            <option value="per-screenshot">One section per screenshot</option>
+            <option value="combined">One continuous document (e.g. a long page captured in parts)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Language of the text</span>
+          <select id="opt-lang">
+            <option value="eng">English</option>
+            <option value="spa">Spanish</option>
+            <option value="fra">French</option>
+            <option value="deu">German</option>
+            <option value="ita">Italian</option>
+            <option value="por">Portuguese</option>
+            <option value="nld">Dutch</option>
+          </select>
+        </label>
+        <div class="checks">
+          <label class="check"><input type="checkbox" id="opt-overlap" checked> Remove text repeated between screenshots (scrolling captures)</label>
+          <label class="check"><input type="checkbox" id="opt-statusbar" checked> Ignore phone status bar (clock, battery)</label>
+          <label class="check"><input type="checkbox" id="opt-images"> Include the original screenshots in the document</label>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn primary big" id="run" disabled>Read text &amp; create document</button>
+        <span class="hint" id="run-hint">Add at least one screenshot to start.</span>
+      </div>
+      <div class="progress" id="progress" hidden>
+        <div class="bar"><div class="fill" id="progress-fill"></div></div>
+        <p id="progress-text" aria-live="polite">Starting…</p>
+      </div>
+    </section>
+
+    <!-- STEP 3 -->
+    <section class="card" id="step-result" aria-labelledby="h-result" hidden>
+      <h2 id="h-result"><span class="step">3</span> Review &amp; download</h2>
+      <div class="stats" id="stats"></div>
+
+      <div class="downloads">
+        <button type="button" class="btn primary" data-export="docx">⬇ Word (.docx)</button>
+        <button type="button" class="btn" data-export="pdf">🖨 PDF / Print</button>
+        <button type="button" class="btn" data-export="html">⬇ Web page (.html)</button>
+        <button type="button" class="btn" data-export="md">⬇ Markdown (.md)</button>
+        <button type="button" class="btn" data-export="txt">⬇ Text (.txt)</button>
+        <button type="button" class="btn ghost" id="copy-text">📋 Copy text</button>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" class="tab active" id="tab-preview" aria-selected="true" aria-controls="panel-preview">Preview</button>
+        <button type="button" role="tab" class="tab" id="tab-edit" aria-selected="false" aria-controls="panel-edit">Edit text</button>
+      </div>
+      <div id="panel-preview" role="tabpanel" aria-labelledby="tab-preview">
+        <iframe id="preview" title="Document preview"></iframe>
+      </div>
+      <div id="panel-edit" role="tabpanel" aria-labelledby="tab-edit" hidden>
+        <details class="help">
+          <summary>How to format while editing</summary>
+          <ul>
+            <li><code># Heading</code>, <code>## Smaller heading</code>, <code>### Label</code></li>
+            <li><code>- item</code> for bullets, <code>1. item</code> for numbered lists, <code>[ ] task</code> / <code>[x] done</code> for checklists</li>
+            <li><code>Label: value</code> on its own line shows as a labeled detail</li>
+            <li>Leave a blank line between paragraphs.</li>
+          </ul>
+        </details>
+        <label class="field">
+          <span>Document title</span>
+          <input type="text" id="edit-title">
+        </label>
+        <div id="edit-sections"></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap footer">
+    Text recognition by <a href="https://github.com/naptha/tesseract.js" target="_blank" rel="noopener">Tesseract.js</a>.
+    Results depend on image quality — always double-check important details.
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="js/organizer.js"></script>
+  <script src="js/exporters.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
