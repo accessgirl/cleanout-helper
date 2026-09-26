@@ -49,8 +49,8 @@
         <label class="field">
           <span>Organize the document</span>
           <select id="opt-layout">
-            <option value="per-screenshot">One section per screenshot</option>
-            <option value="combined">One continuous document (e.g. a long page captured in parts)</option>
+            <option value="per-screenshot">Automatic: a section per topic, scrolling captures joined</option>
+            <option value="combined">Everything as one continuous document</option>
           </select>
         </label>
         <label class="field">
@@ -66,8 +66,8 @@
           </select>
         </label>
         <div class="checks">
-          <label class="check"><input type="checkbox" id="opt-overlap" checked> Remove text repeated between screenshots (scrolling captures)</label>
-          <label class="check"><input type="checkbox" id="opt-statusbar" checked> Ignore phone status bar (clock, battery)</label>
+          <label class="check"><input type="checkbox" id="opt-overlap" checked> Join screenshots taken while scrolling: put them in order and remove repeated text</label>
+          <label class="check"><input type="checkbox" id="opt-statusbar" checked> Ignore phone status bar and app buttons (clock, battery, Reply, Like, Write a comment…)</label>
           <label class="check"><input type="checkbox" id="opt-images"> Include the original screenshots in the document</label>
         </div>
       </div>

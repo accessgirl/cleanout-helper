@@ -23,19 +23,21 @@ test('upload screenshots, build and export a document', { skip: !playwright && '
     const errors = [];
     const external = [];
     page.on('pageerror', (e) => errors.push(e.message));
-    page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
+    // Tesseract logs its automatic resolution estimate as an "error"; that's informational.
+    page.on('console', (m) => { if (m.type() === 'error' && !/^Estimating resolution/.test(m.text())) errors.push(m.text()); });
     page.on('request', (r) => { if (!r.url().startsWith('http://localhost') && !/^(blob|data):/.test(r.url())) external.push(r.url()); });
 
     await page.goto('http://localhost:' + port + '/');
-    await page.setInputFiles('#file-input', ['plan.png', 'dark-mode.png', 'article-part1.png', 'article-part2.png'].map((f) => path.join(fixtures, f)));
-    await page.waitForSelector('.thumb >> nth=3');
-    assert.strictEqual(await page.locator('.thumb').count(), 4);
+    await page.setInputFiles('#file-input', ['plan.png', 'dark-mode.png', 'article-part2.png', 'article-part1.png', 'chat-light.png'].map((f) => path.join(fixtures, f)));
+    await page.waitForSelector('.thumb >> nth=4');
+    assert.strictEqual(await page.locator('.thumb').count(), 5);
 
-    // Reorder: move dark-mode screenshot to the end.
+    // Reorder: move the dark-mode screenshot after the article parts.
     await page.locator('.thumb >> nth=1').locator('[data-act="right"]').click();
     await page.locator('.thumb >> nth=2').locator('[data-act="right"]').click();
     const names = await page.locator('.thumb .name').allTextContents();
-    assert.deepStrictEqual(names, ['plan.png', 'article-part1.png', 'article-part2.png', 'dark-mode.png']);
+    // The article parts are deliberately in the wrong order: the app sorts them out.
+    assert.deepStrictEqual(names, ['plan.png', 'article-part2.png', 'article-part1.png', 'dark-mode.png', 'chat-light.png']);
 
     await page.fill('#opt-title', 'My Cleanout Notes');
     await page.check('#opt-images');
@@ -45,12 +47,16 @@ test('upload screenshots, build and export a document', { skip: !playwright && '
 
     const doc = await page.evaluate(() => window.ScreenshotApp.doc);
     assert.strictEqual(doc.title, 'My Cleanout Notes');
-    assert.deepStrictEqual(doc.sections.map((s) => s.title), ['Garage Cleanout Plan', 'How to Sort a Cluttered Closet', 'How to Sort a Cluttered Closet (continued)', 'Moving Day Checklist']);
-    assert.ok(doc.sections[2].removedLines >= 2);
-    const checklist = doc.sections[3].blocks.find((b) => b.type === 'list' && b.style === 'checklist');
+    assert.deepStrictEqual(doc.sections.map((s) => s.title), ['Garage Cleanout Plan', 'How to Sort a Cluttered Closet', 'Moving Day Checklist', 'Conversation with Jamie Diaz']);
+    assert.deepStrictEqual(doc.sections[1].sourceFiles, ['article-part1.png', 'article-part2.png']);
+    assert.ok(doc.sections[1].removedLines >= 2);
+    const checklist = doc.sections[2].blocks.find((b) => b.type === 'list' && b.style === 'checklist');
     assert.ok(checklist, 'dark-mode checklist recognized');
     assert.deepStrictEqual(checklist.items.map((i) => i.checked), [true, false, false]);
-    assert.ok(doc.sections.every((s) => s.images && s.images.length === 1));
+    const chat = doc.sections[3].blocks.find((b) => b.type === 'fields');
+    assert.deepStrictEqual(chat.items.map((i) => i.label), ['Jamie Diaz', 'Me', 'Jamie Diaz', 'Me', 'Jamie Diaz', 'Me']);
+    assert.match(chat.items[1].value, /^Yes! Can you be there by 9:30 AM\?$/);
+    assert.deepStrictEqual(doc.sections.map((s) => s.images.length), [1, 2, 1, 1]);
 
     const frame = page.frameLocator('#preview');
     await frame.locator('text=Key Details at a Glance').waitFor();
