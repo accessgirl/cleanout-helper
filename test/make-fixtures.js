@@ -14,15 +14,20 @@ const shots = [
   // One long page captured as two overlapping "scrolling" screenshots.
   { html: 'article.html', out: 'article-part1.png', viewport: { width: 700, height: 1100 }, clip: { x: 0, y: 0, width: 700, height: 560 } },
   { html: 'article.html', out: 'article-part2.png', viewport: { width: 700, height: 1100 }, clip: { x: 0, y: 380, width: 700, height: 330 } },
+  // Phone chat screenshots (iPhone size, 3x pixel density), light and dark.
+  { html: 'chat.html', theme: 'light', out: 'chat-light.png', viewport: { width: 390, height: 700 }, scale: 3 },
+  { html: 'chat.html', theme: 'dark', out: 'chat-dark.png', viewport: { width: 390, height: 700 }, scale: 3 },
 ];
 
 (async () => {
   const browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {});
-  const page = await browser.newPage();
+  const fs = require('fs');
   for (const s of shots) {
-    await page.setViewportSize(s.viewport);
-    await page.goto('file://' + path.join(dir, s.html));
+    const page = await browser.newPage({ viewport: s.viewport, deviceScaleFactor: s.scale || 1 });
+    const html = fs.readFileSync(path.join(dir, s.html), 'utf8').replace('THEME', s.theme || '');
+    await page.setContent(html);
     await page.screenshot({ path: path.join(dir, s.out), clip: s.clip });
+    await page.close();
     console.log('wrote', s.out);
   }
   await browser.close();

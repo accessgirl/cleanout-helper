@@ -82,6 +82,7 @@ test('docx builds a valid Word file', async () => {
 test('safe file names', () => {
   assert.strictEqual(E.safeFileName('My: notes / today?', 'md'), 'My notes today.md');
   assert.strictEqual(E.safeFileName('', 'txt'), 'screenshot-notes.txt');
+  assert.strictEqual(E.safeFileName('Sliders are easy and delicious…', 'docx'), 'Sliders are easy and delicious.docx');
 });
 
 // Minimal zip reader for word/document.xml (stored or deflated).

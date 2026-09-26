@@ -64,6 +64,7 @@
   const NUMBERED = /^(\d{1,2})[.)]\s+(.+)$/;
   // "[ ]", "[x]", ballot boxes, plus common OCR misreads of an empty box ("[1", "[]", "LJ").
   const CHECKBOX = /^(?:\[( |x|X|✓|✔)?\]|\[[1lI|](?=\s)|LJ(?=\s)|(☐|□)|(☑|☒|✅|✓|✔))\s*(.+)$/;
+  const MARKER_TOKEN = /^(?:[•●○◦▪▫■◆◇►▸‣⁃∙·*+>«»©®oe¢c\-–—]|\[.?\]?|\]|\[1|LJ|☐|□|☑|☒|✅|✓|✔)$/;
   const FIELD = /^([A-Z][A-Za-z0-9 '&/#().-]{0,28}):\s+(\S.*)$/;
   const STATUS_TIME = /\b\d{1,2}:\d{2}\b/;
 
@@ -89,40 +90,90 @@
     return text.length <= 40 && text.split(' ').length <= 5 && /^[\p{Lu}\d]/u.test(text) && !/[.,;:!?]$/.test(text);
   }
 
+  // App buttons and labels that are not part of the content.
+  const UI_PHRASES = /^(?:reply|replies|like|likes|love|share|send|comment|comments|follow|following|message|translate|see more|see less|see translation|most relevant|newest|all comments|view (?:all |more )?(?:\d+ )?(?:more )?(?:replies|reply|comments?)|write a (?:comment|reply)|add a comment|type a message|imessage|text message|delivered|read|seen)$/i;
+
   // ------------------------------------------------------- OCR -> lines
+
+  function wordText(w) {
+    return cleanText(w && w.text);
+  }
 
   /**
    * Flatten Tesseract output into an ordered list of lines with metrics.
+   * Unreliable text is dropped here: words read from photos and icons have
+   * low confidence, so lines made mostly of those are skipped and weak words
+   * at the start or end of a line (an avatar or icon next to text) are trimmed.
    * @param {object} data   `data` from worker.recognize(..., {blocks: true})
-   * @param {object} opts   { imageHeight, ignoreStatusBar, minConfidence }
+   * @param {object} opts   { imageHeight, imageWidth, ignoreStatusBar, page }
    */
   function extractLines(data, opts) {
     opts = opts || {};
-    const minConfidence = opts.minConfidence == null ? 35 : opts.minConfidence;
+    const H = opts.imageHeight || 0;
+    const W = opts.imageWidth || 0;
+    const phoneShaped = H && W && H >= W * 1.6;
+    const skipChrome = opts.ignoreStatusBar !== false;
     const lines = [];
+    let blockId = 0;
     let paraId = 0;
     (data && data.blocks || []).forEach((block) => {
+      blockId += 1;
       (block.paragraphs || []).forEach((para) => {
         paraId += 1;
         (para.lines || []).forEach((line) => {
-          const text = cleanText(line.text);
+          let words = (line.words || []).filter((w) => wordText(w));
+          // A capital I is often read as "|" ("| will bring…").
+          words = words.map((w, i) => (wordText(w) === '|' && words[i + 1] && /^[a-z']/.test(wordText(words[i + 1])) ?
+            Object.assign({}, w, { text: 'I', confidence: Math.max(w.confidence || 0, 85) }) : w));
+          if (words.length && words.every((w) => typeof w.confidence === 'number')) {
+            // Mostly unreadable → a photo, drawing or icon row, not text.
+            if (median(words.map((w) => w.confidence)) < 60) return;
+            const weak = (w) => w.confidence < 60 || alnumCount(w.text) === 0;
+            // Keep bullets and checkboxes at the start; drop other weak marks (icons, avatars).
+            while (words.length && weak(words[0]) && !MARKER_TOKEN.test(wordText(words[0]))) words.shift();
+            while (words.length && weak(words[words.length - 1])) words.pop();
+            if (!words.length) return;
+          } else {
+            words = [];
+          }
+          // Symbol-only "words" in the middle are usually icons (a verified badge, an emoji).
+          if (words.length) {
+            words = words.filter((w, i) => i === 0 || i === words.length - 1 || w.confidence >= 85 ||
+              /[\p{L}\p{N}&\-–—/+=:%$]/u.test(w.text) || (i === 1 && MARKER_TOKEN.test(wordText(w))));
+          }
+          const text = words.length ? cleanText(words.map(wordText).join(' ')) : cleanText(line.text);
           if (!text) return;
           const alnum = alnumCount(text);
           // Drop OCR noise: icons, separators, specks.
           if (alnum === 0) return;
           if (alnum / text.replace(/\s/g, '').length < 0.4 && alnum < 4) return;
-          if (line.confidence < minConfidence && alnum < 4) return;
-          if (line.confidence < 20) return;
-          const bbox = line.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 };
-          // Phone status bar ("9:41  5G  87%") at the very top of the image.
-          if (opts.ignoreStatusBar !== false && opts.imageHeight &&
-              bbox.y1 < opts.imageHeight * 0.06 && text.length < 30 && STATUS_TIME.test(text)) return;
+          if (line.confidence < 45 && alnum < 6) return;
+          if (line.confidence < 25) return;
+
+          const lb = line.bbox || { x0: 0, y0: 0, x1: 0, y1: 0 };
+          const bbox = words.length && words[0].bbox ?
+            { x0: words[0].bbox.x0, y0: lb.y0, x1: words[words.length - 1].bbox.x1, y1: lb.y1 } :
+            { x0: lb.x0, y0: lb.y0, x1: lb.x1, y1: lb.y1 };
+
+          if (skipChrome) {
+            // Phone status bar (clock, battery) and navigation bar.
+            if (phoneShaped && bbox.y1 < H * 0.045) return;
+            if (phoneShaped && bbox.y0 > H * 0.955 && text.length < 30) return;
+            if (H && bbox.y1 < H * 0.06 && text.length < 30 && STATUS_TIME.test(text)) return;
+            if (UI_PHRASES.test(text.replace(/[\s.…:!]+$/, ''))) return;
+          }
+
+          const size = capHeight(line);
+          const first = words[0];
           lines.push({
             text,
+            norm: normalize(text),
             bbox,
-            size: capHeight(line),
+            size,
+            firstWordWidth: first && first.bbox ? first.bbox.x1 - first.bbox.x0 : (text.split(' ')[0].length * size * 0.7),
             confidence: line.confidence,
-            paraId,
+            blockId: (opts.page || 0) + ':' + blockId,
+            paraId: (opts.page || 0) + ':' + paraId,
           });
         });
       });
@@ -130,41 +181,224 @@
     return lines;
   }
 
-  // ---------------------------------------------- overlap between screenshots
+  // ------------------------------------------------ scrolling screenshots
+
+  function bigrams(s) {
+    const map = new Map();
+    for (let i = 0; i < s.length - 1; i++) {
+      const g = s.substr(i, 2);
+      map.set(g, (map.get(g) || 0) + 1);
+    }
+    return map;
+  }
+
+  /** How alike two normalised strings are, 0..1 (Dice coefficient). */
+  function similarity(a, b) {
+    if (a === b) return 1;
+    if (a.length < 2 || b.length < 2) return 0;
+    const A = bigrams(a);
+    const B = bigrams(b);
+    let inter = 0;
+    A.forEach((n, g) => { if (B.has(g)) inter += Math.min(n, B.get(g)); });
+    return (2 * inter) / (a.length + b.length - 2);
+  }
+
+  /** Pairs of lines with (nearly) the same text in two screenshots. */
+  function matchLines(A, B) {
+    const used = new Set();
+    const matches = [];
+    B.forEach((b) => {
+      if (b.norm.length < 6) return;
+      // The same pixels give (almost) the same text, so be strict: similar
+      // but different lines ("1 cup shredded … cheese") must not pair up.
+      let best = A.find((a) => !used.has(a) && a.norm === b.norm) || null;
+      let bestSim = 0.92;
+      if (!best) {
+        A.forEach((a) => {
+          if (used.has(a) || Math.abs(a.norm.length - b.norm.length) > Math.max(a.norm.length, b.norm.length) * 0.2) return;
+          const sim = similarity(a.norm, b.norm);
+          if (sim >= bestSim) { best = a; bestSim = sim; }
+        });
+      }
+      if (best) {
+        used.add(best);
+        matches.push({ a: best, b, dy: best.bbox.y0 - b.bbox.y0 });
+      }
+    });
+    return matches;
+  }
 
   /**
-   * When several screenshots are taken while scrolling, the top of one
-   * usually repeats the bottom of the previous one. Finds that repeated run.
-   * A few lines may be skipped at the bottom of `previous` (a half cut-off
-   * line) and at the top of `current` (an app header or cut-off line).
-   * Returns { dropPrev, dropCur }: trailing lines to remove from `previous`
-   * and leading lines to remove from `current`.
+   * Work out which screenshots are parts of the same scrolled page.
+   * Two screenshots are linked when several lines appear in both, shifted by
+   * the same distance. Lines that appear in both at the *same* place are
+   * fixed parts of the app (a header, a "Write a comment" bar) and are
+   * removed. Returns groups of page indexes in reading order, and each
+   * page's position on the long page.
    */
-  function findOverlap(previous, current) {
-    const prev = previous.map((l) => normalize(l.text));
-    const cur = current.map((l) => normalize(l.text));
-    let best = { dropPrev: 0, dropCur: 0, score: 0 };
-    for (let skipPrev = 0; skipPrev <= Math.min(2, prev.length - 1); skipPrev++) {
-      const tail = prev.slice(0, prev.length - skipPrev);
-      for (let skipCur = 0; skipCur <= Math.min(3, cur.length - 1); skipCur++) {
-        const maxK = Math.min(tail.length, cur.length - skipCur);
-        for (let k = maxK; k >= 1; k--) {
-          let ok = true;
-          let chars = 0;
-          for (let i = 0; i < k; i++) {
-            const a = tail[tail.length - k + i];
-            if (!a || a !== cur[skipCur + i]) { ok = false; break; }
-            chars += a.length;
-          }
-          // Require enough matching text that this isn't a coincidence.
-          if (ok && (k >= 2 || chars >= 20)) {
-            if (chars > best.score) best = { dropPrev: skipPrev, dropCur: skipCur + k, score: chars };
-            break;
-          }
-        }
+  function findScrollGroups(pageLines, heights, autoOrder) {
+    const n = pageLines.length;
+    const parent = pageLines.map((_, i) => i);
+    const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+    const links = [];
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const matches = matchLines(pageLines[i], pageLines[j]);
+        if (!matches.length) continue;
+        const tol = Math.max(4, Math.max(heights[i] || 0, heights[j] || 0) * 0.012);
+        const moved = matches.filter((m) => Math.abs(m.dy) > tol);
+        if (!moved.length) continue;
+        const dy = median(moved.map((m) => m.dy));
+        const consistent = moved.filter((m) => Math.abs(m.dy - dy) <= tol * 2);
+        const chars = consistent.reduce((a, m) => a + m.b.norm.length, 0);
+        if (consistent.length < 2 && chars < 25) continue;
+        links.push({ i, j, dy });
+        parent[find(j)] = find(i);
+        // Same text at the same spot in both = part of the app, not the content.
+        matches.filter((m) => Math.abs(m.dy) <= tol).forEach((m) => { m.a.chrome = true; m.b.chrome = true; });
       }
     }
-    return { dropPrev: best.dropPrev, dropCur: best.dropCur };
+
+    // Position of every page on its long page (page top, in pixels).
+    const pos = pageLines.map(() => null);
+    for (let start = 0; start < n; start++) {
+      if (pos[start] !== null) continue;
+      pos[start] = 0;
+      const queue = [start];
+      while (queue.length) {
+        const k = queue.shift();
+        links.forEach((l) => {
+          if (l.i === k && pos[l.j] === null) { pos[l.j] = pos[k] + l.dy; queue.push(l.j); }
+          else if (l.j === k && pos[l.i] === null) { pos[l.i] = pos[k] - l.dy; queue.push(l.i); }
+        });
+      }
+    }
+
+    const groups = [];
+    const byRoot = new Map();
+    for (let i = 0; i < n; i++) {
+      const r = find(i);
+      if (!byRoot.has(r)) { byRoot.set(r, []); groups.push(byRoot.get(r)); }
+      byRoot.get(r).push(i);
+    }
+    if (autoOrder) groups.forEach((g) => g.sort((a, b) => pos[a] - pos[b]));
+    return { groups, pos };
+  }
+
+  /**
+   * Remove text a page repeats from the pages before it (same text at the
+   * same place on the long page). Where two different lines land on the same
+   * spot, the one read more confidently wins (usually the one that was not
+   * cut off by the edge of the screen).
+   * @param earlier  [{ line, y }] lines of earlier pages, y on the long page
+   * @param cur      lines of this page
+   * @param shift    this page's position on the long page
+   */
+  function removeRepeats(earlier, cur, shift) {
+    let removed = 0;
+    const kept = [];
+    cur.forEach((line) => {
+      const y = line.bbox.y0 + shift;
+      const tol = Math.max(8, (line.bbox.y1 - line.bbox.y0) * 0.7);
+      const same = earlier.filter((e) => Math.abs(e.y - y) <= tol && e.line.bbox.x0 < line.bbox.x1 && line.bbox.x0 < e.line.bbox.x1);
+      if (!same.length) { kept.push(line); return; }
+      const p = same.reduce((best, c) => (similarity(c.line.norm, line.norm) > similarity(best.line.norm, line.norm) ? c : best)).line;
+      const sim = similarity(p.norm, line.norm);
+      if (sim >= 0.6) removed++;
+      if (line.confidence > p.confidence + 5 || (sim >= 0.6 && line.norm.length > p.norm.length + 2 && line.confidence >= p.confidence - 5)) {
+        Object.assign(p, { text: line.text, norm: line.norm, confidence: line.confidence, firstWordWidth: line.firstWordWidth });
+      }
+    });
+    return { kept, removed };
+  }
+
+  // "Luke Brown · 8w · Author" — who posted a comment or message, and when.
+  const BYLINE = /^([\p{L}][\p{L} .'’-]{1,40}?)\s*(?:[&@©®✓✔*]\s*)?[-·•|]\s*(\d{1,3}\s?(?:s|m|h|d|w|y|mo|min|mins|hr|hrs|wk|wks|yr|yrs)|just now|yesterday)\b(.*)$/iu;
+
+  /** Tidy post/comment bylines; drop a byline left dangling at the very end. */
+  function tidyBylines(blocks) {
+    blocks.forEach((b) => {
+      if (b.type !== 'paragraph') return;
+      const m = b.text.match(BYLINE);
+      if (!m) return;
+      const extra = m[3].split(/\s*[-·•|]\s*/).map((t) => t.trim()).filter(Boolean);
+      b.text = [m[1].trim(), m[2].trim()].concat(extra).join(' · ');
+      b.byline = true;
+    });
+    while (blocks.length && blocks[blocks.length - 1].byline) blocks.pop();
+    return blocks;
+  }
+
+  // ------------------------------------------------------------ chats
+
+  /** Where a line sits across the screen: 'left', 'right' or 'center'. */
+  function lineSide(l, W) {
+    const mid = (l.bbox.x0 + l.bbox.x1) / 2;
+    if (l.bbox.x0 > W * 0.2 && l.bbox.x1 < W * 0.8 && Math.abs(mid - W / 2) < W * 0.06) return 'center';
+    if (l.bbox.x0 < W * 0.15) return 'left';
+    if (l.bbox.x0 > W * 0.18) return 'right';
+    return 'left';
+  }
+
+  /**
+   * A chat screenshot has message bubbles on both sides: at least two
+   * separate text areas hugging the left edge and two hugging the right.
+   */
+  function looksLikeChat(lines, W) {
+    if (!W || lines.length < 4) return false;
+    const blocks = { left: new Set(), right: new Set() };
+    let rightEdge = false;
+    lines.forEach((l) => {
+      const side = lineSide(l, W);
+      if (side === 'left' && l.bbox.x1 < W * 0.85) blocks.left.add(l.blockId);
+      if (side === 'right') {
+        blocks.right.add(l.blockId);
+        if (l.bbox.x1 > W * 0.8) rightEdge = true;
+      }
+    });
+    return rightEdge && blocks.left.size >= 2 && blocks.right.size >= 2;
+  }
+
+  /** The contact's name shown centered near the top of a chat, if any. */
+  function chatName(lines, W, H) {
+    const cand = lines.find((l) => l.bbox.y1 < (H || Infinity) * 0.25 && lineSide(l, W) === 'center' &&
+      /^\p{Lu}[\p{L}'’.-]*(?: [\p{L}'’.-]+){0,3}$/u.test(l.text.replace(/\s*[›>»]$/, '')) && !STATUS_TIME.test(l.text));
+    return cand ? cand.text.replace(/\s*[›>»]$/, '') : null;
+  }
+
+  /**
+   * Chat screenshot → a transcript: "Name: message" for each bubble.
+   * Left bubbles are the other person, right bubbles are "Me".
+   */
+  function buildChatBlocks(lines, W, H) {
+    const name = chatName(lines, W, H);
+    const blocks = [];
+    let current = null;
+    let prev = null;
+    lines.forEach((l) => {
+      if (name && l.text.replace(/\s*[›>»]$/, '') === name && lineSide(l, W) === 'center') return;
+      const side = lineSide(l, W);
+      if (side === 'center') {
+        // Timestamps and notes such as "Today 2:14 PM" separate the messages.
+        current = null;
+        blocks.push({ type: 'paragraph', text: l.text, note: true });
+        prev = l;
+        return;
+      }
+      const who = side === 'right' ? 'Me' : (name || 'Them');
+      // Lines of one bubble are tightly spaced; bubbles have padding between them.
+      const sameBubble = prev && current && lineSide(prev, W) === side &&
+        l.bbox.y0 - prev.bbox.y1 < (prev.bbox.y1 - prev.bbox.y0) * 0.9;
+      if (sameBubble) {
+        const item = current.items[current.items.length - 1];
+        item.value = joinText(item.value, l.text);
+      } else {
+        if (!current) { current = { type: 'fields', chat: true, items: [] }; blocks.push(current); }
+        current.items.push({ label: who, value: l.text });
+      }
+      prev = l;
+    });
+    return { blocks, name };
   }
 
   // ------------------------------------------------------- lines -> blocks
@@ -174,9 +408,15 @@
     return a + ' ' + b;
   }
 
+  function isListMarker(text) {
+    const k = classifyLine(text).kind;
+    return k === 'bullet' || k === 'ordered' || k === 'check';
+  }
+
   /**
-   * Group lines into document blocks using font size, spacing and
-   * line prefixes.
+   * Group lines into document blocks using font size, spacing, line
+   * endings and line prefixes. Lines must be in reading order with
+   * y positions on one shared scale.
    */
   function buildBlocks(lines) {
     if (!lines.length) return [];
@@ -190,99 +430,119 @@
     const gaps = [];
     for (let i = 1; i < lines.length; i++) {
       const g = lines[i].bbox.y0 - lines[i - 1].bbox.y1;
-      if (g >= 0) gaps.push(g);
+      if (g >= 0 && !lines[i].pageBreak) gaps.push(g);
     }
     const typicalGap = median(gaps) || bodySize * 0.6;
-    const leftMargin = median(lines.map((l) => l.bbox.x0));
+    const pageWidth = Math.max(...lines.map((l) => l.bbox.x1));
+    const colTol = Math.max(12, pageWidth * 0.03);
+    const charWidth = median(lines.map((l) => (l.bbox.x1 - l.bbox.x0) / Math.max(1, l.text.length))) || bodySize * 0.6;
+    // Right edge of the text column a line belongs to, or null when the
+    // column doesn't look like wrapped text (it must be reasonably wide and
+    // at least two lines must reach its edge).
+    const rightEdge = (line) => {
+      const col = lines.filter((l) => Math.abs(l.bbox.x0 - line.bbox.x0) <= colTol && l.size < bodySize * 1.2);
+      if (!col.length) return null;
+      const edge = Math.max(...col.map((l) => l.bbox.x1));
+      const reaching = col.filter((l) => l.bbox.x1 >= edge - charWidth * 8).length;
+      if (reaching < 3 || (edge - line.bbox.x0) / charWidth < 24) return null;
+      return edge;
+    };
 
-    const blocks = [];
-    let current = null; // paragraph or list being built
-    let prev = null;
-
-    function flush() {
-      if (current) blocks.push(current);
-      current = null;
-    }
-
-    lines.forEach((line) => {
-      const ratio = line.size / bodySize;
+    // 1. Join lines that wrapped onto the next line into "logical" lines.
+    const logical = [];
+    lines.forEach((line, idx) => {
+      const prev = idx > 0 ? lines[idx - 1] : null;
       const gap = prev ? line.bbox.y0 - prev.bbox.y1 : 0;
-      const bigGap = prev && (gap > Math.max(typicalGap * 1.8, bodySize * 1.1) || gap < -bodySize * 2);
-      const c = classifyLine(line.text);
-
-      // ---- headings
-      let level = 0;
-      if (c.kind === 'text' && line.text.length <= 90 && !/[.,;]$/.test(line.text)) {
-        if (ratio >= 1.65) level = 1;
-        else if (ratio >= 1.25) level = 2;
-        else if (isAllCapsLabel(line.text) || (ratio >= 1.12 && isShortLabel(line.text))) level = 3;
-      }
-      if (level) {
-        const last = blocks[blocks.length - 1];
-        if (!current && last && last.type === 'heading' && last.level === level && !bigGap &&
-            prev && prev.headingLevel === level) {
-          last.text = joinText(last.text, line.text); // heading wrapped onto 2 lines
-        } else {
-          flush();
-          blocks.push({ type: 'heading', level, text: line.text });
-        }
-        line.headingLevel = level;
-        prev = line;
+      const bigGap = !prev || line.pageBreak || gap > Math.max(typicalGap * 1.8, bodySize * 1.1) || gap < -bodySize * 2;
+      const last = logical[logical.length - 1];
+      const space = bodySize * 0.6;
+      const wrapped = prev && !bigGap && last && !last.heading &&
+        line.size < prev.size * 1.1 && !isAllCapsLabel(line.text) &&
+        !isListMarker(line.text) && classifyLine(line.text).kind !== 'field' &&
+        (Math.abs(line.bbox.x0 - prev.bbox.x0) <= colTol || (last.marker && line.bbox.x0 > last.x0)) &&
+        rightEdge(prev) !== null && rightEdge(prev) - prev.bbox.x1 < line.firstWordWidth + space;
+      if (wrapped) {
+        last.text = joinText(last.text, line.text);
+        last.lastY1 = line.bbox.y1;
         return;
       }
+      const ratio = line.size / bodySize;
+      let heading = 0;
+      if (classifyLine(line.text).kind === 'text' && line.text.length <= 90 && !/[.,;]$/.test(line.text)) {
+        if (ratio >= 1.65) heading = 1;
+        else if (ratio >= 1.25) heading = 2;
+        else if (isAllCapsLabel(line.text) || (ratio >= 1.12 && isShortLabel(line.text))) heading = 3;
+      }
+      logical.push({
+        text: line.text,
+        heading,
+        marker: isListMarker(line.text),
+        x0: line.bbox.x0,
+        bigGap,
+        newBlock: prev && prev.blockId !== line.blockId && gap > typicalGap * 1.3,
+        blockId: line.blockId,
+        lastY1: line.bbox.y1,
+      });
+    });
 
-      // ---- list items
+    // 2. Turn logical lines into headings, lists, fields and paragraphs.
+    const blocks = [];
+    let current = null;
+    let run = []; // consecutive plain lines, decided on when the run ends
+    const flush = () => { if (current) blocks.push(current); current = null; };
+    const flushRun = () => {
+      if (!run.length) return;
+      const short = run.filter((l) => l.text.length <= 80).length;
+      if (run.length >= 3 && short >= run.length * 0.66) {
+        blocks.push({ type: 'list', style: 'bullet', items: run.map((l) => ({ text: l.text })) });
+      } else {
+        run.forEach((l) => blocks.push({ type: 'paragraph', text: l.text }));
+      }
+      run = [];
+    };
+
+    logical.forEach((l, idx) => {
+      const prevL = idx > 0 ? logical[idx - 1] : null;
+      const breakBefore = l.bigGap || l.newBlock;
+      if (l.heading) {
+        flush(); flushRun();
+        const last = blocks[blocks.length - 1];
+        if (last && last.type === 'heading' && last.level === l.heading && prevL && prevL.heading === l.heading && !breakBefore) {
+          last.text = joinText(last.text, l.text); // heading wrapped onto 2 lines
+        } else {
+          blocks.push({ type: 'heading', level: l.heading, text: l.text });
+        }
+        return;
+      }
+      const c = classifyLine(l.text);
       if (c.kind === 'bullet' || c.kind === 'ordered' || c.kind === 'check') {
+        flushRun();
         const listType = c.kind === 'check' ? 'checklist' : c.kind === 'ordered' ? 'ordered' : 'bullet';
-        if (!current || current.type !== 'list' || current.style !== listType || bigGap) {
+        if (!current || current.type !== 'list' || current.style !== listType || l.bigGap) {
           flush();
           current = { type: 'list', style: listType, items: [] };
         }
-        const item = { text: c.text, x: line.bbox.x0 };
+        const item = { text: c.text };
         if (listType === 'checklist') item.checked = c.checked;
         if (listType === 'ordered') item.number = c.number;
         current.items.push(item);
-        prev = line;
         return;
       }
-
-      // Continuation of a wrapped list item (indented, no bullet, close by).
-      if (current && current.type === 'list' && !bigGap && prev && !prev.headingLevel &&
-          line.bbox.x0 > leftMargin + bodySize * 0.8) {
-        const item = current.items[current.items.length - 1];
-        item.text = joinText(item.text, line.text);
-        prev = line;
-        return;
-      }
-
-      // ---- "Label: value" fields
       if (c.kind === 'field') {
-        if (!current || current.type !== 'fields' || bigGap) {
+        flushRun();
+        if (!current || current.type !== 'fields' || l.bigGap) {
           flush();
           current = { type: 'fields', items: [] };
         }
         current.items.push({ label: c.label, value: c.text });
-        prev = line;
         return;
       }
-
-      // ---- paragraphs
-      const newPara = !current || current.type !== 'paragraph' || bigGap ||
-        (prev && prev.paraId !== line.paraId && gap > typicalGap * 1.3);
-      if (newPara) {
-        flush();
-        current = { type: 'paragraph', text: line.text };
-      } else {
-        current.text = joinText(current.text, line.text);
-      }
-      prev = line;
+      flush();
+      if (breakBefore) flushRun();
+      run.push(l);
     });
     flush();
-
-    // Remove layout-only info.
-    blocks.forEach((b) => {
-      if (b.type === 'list') b.items.forEach((i) => { delete i.x; });
-    });
+    flushRun();
     return blocks;
   }
 
@@ -454,15 +714,32 @@
     return text.length > max ? text.slice(0, max - 1).trim() + '…' : text;
   }
 
-  /** Pull the first heading out as the section title, if there is one. */
-  function titleSection(section, index) {
+  /**
+   * Name a section: its first heading if it starts with one (the heading is
+   * then removed from the body), otherwise the first sentence of its text.
+   */
+  function titleSection(section, index, fixedTitle) {
     const first = section.blocks[0];
-    if (first && first.type === 'heading') {
+    if (fixedTitle) {
+      section.title = fixedTitle;
+    } else if (first && first.type === 'heading') {
       section.title = truncate(first.text, 70);
       section.blocks = section.blocks.slice(1);
     } else {
-      section.title = 'Screenshot ' + (index + 1);
+      const text = blockTexts(section.blocks).find((t) => (t.match(/[\p{L}\p{N}]+/gu) || []).length >= 5);
+      section.title = text ? shortTitle(text) : 'Screenshot ' + (index + 1);
     }
+  }
+
+  /** First sentence of a text, cut at a word boundary to about 60 characters. */
+  function shortTitle(text) {
+    const sentences = text.split(/(?<=[.!?])\s/);
+    let t = (sentences.find((x) => x.split(/\s+/).length >= 4) || text).replace(/[.!?:;,]+$/, '');
+    // "Cheesy BBQ Chicken sliders are a super easy dinner" → "Cheesy BBQ Chicken sliders"
+    const subject = t.match(/^(\S+(?:\s+\S+){1,6}?)\s+(?:is|are|was|were|makes?|has|have)\s/i);
+    if (subject && /^\p{Lu}/u.test(subject[1])) return subject[1];
+    if (t.length > 60) t = t.slice(0, 60).replace(/\s+\S*$/, '') + '…';
+    return t;
   }
 
   function recomputeSection(section) {
@@ -472,57 +749,77 @@
 
   /**
    * Build a document from several OCR'd pages.
-   * @param {Array} pages  [{ fileName, data, imageHeight }]
+   * @param {Array} pages  [{ fileName, data, imageHeight, imageWidth }]
    * @param {object} opts  { title, layout: 'per-screenshot'|'combined',
-   *                         removeOverlap, ignoreStatusBar }
+   *                         removeOverlap, ignoreStatusBar, autoOrder }
+   *   per-screenshot: one section per screenshot, except screenshots of the
+   *                   same scrolled page, which are joined into one section.
+   *   combined:       everything in one section.
    */
   function organize(pages, opts) {
-    opts = Object.assign({ layout: 'per-screenshot', removeOverlap: true, ignoreStatusBar: true }, opts);
-    const pageLines = pages.map((p) => extractLines(p.data, { imageHeight: p.imageHeight, ignoreStatusBar: opts.ignoreStatusBar }));
+    opts = Object.assign({ layout: 'per-screenshot', removeOverlap: true, ignoreStatusBar: true, autoOrder: true }, opts);
+    const pageLines = pages.map((p, i) => extractLines(p.data, {
+      imageHeight: p.imageHeight, imageWidth: p.imageWidth, ignoreStatusBar: opts.ignoreStatusBar, page: i,
+    }));
 
-    const overlaps = pageLines.map(() => 0);
-    if (opts.removeOverlap) {
-      for (let i = 1; i < pageLines.length; i++) {
-        const o = findOverlap(pageLines[i - 1], pageLines[i]);
-        if (o.dropCur) {
-          pageLines[i] = pageLines[i].slice(o.dropCur);
-          if (o.dropPrev) pageLines[i - 1] = pageLines[i - 1].slice(0, -o.dropPrev);
-          overlaps[i] = o.dropCur;
-        }
+    let groups = pages.map((_, i) => [i]);
+    let pos = pages.map(() => 0);
+    const removed = pages.map(() => 0);
+    if (opts.removeOverlap && pages.length > 1) {
+      const found = findScrollGroups(pageLines, pages.map((p) => p.imageHeight), opts.autoOrder);
+      groups = found.groups;
+      pos = found.pos;
+      if (opts.ignoreStatusBar !== false) {
+        pageLines.forEach((lines, i) => { pageLines[i] = lines.filter((l) => !l.chrome); });
       }
+      groups.forEach((g) => {
+        const earlier = [];
+        g.forEach((pi, k) => {
+          const all = pageLines[pi];
+          if (k > 0) {
+            const r = removeRepeats(earlier, all, pos[pi]);
+            pageLines[pi] = r.kept;
+            removed[pi] = r.removed;
+          }
+          all.forEach((line) => earlier.push({ line, y: line.bbox.y0 + pos[pi] }));
+        });
+      });
     }
 
-    let sections;
-    if (opts.layout === 'combined') {
-      const blocks = [];
-      pageLines.forEach((lines) => blocks.push(...buildBlocks(lines)));
-      sections = [{ id: 's1', title: '', sourceFiles: pages.map((p) => p.fileName), blocks }];
-      const first = blocks[0];
-      if (first && first.type === 'heading' && !opts.title) {
-        sections[0].title = truncate(first.text, 70);
-        sections[0].blocks = blocks.slice(1);
+    // Lines of a group of pages, in reading order on one y scale.
+    const groupLines = (g) => {
+      const out = [];
+      g.forEach((pi) => {
+        pageLines[pi].forEach((l) => out.push(Object.assign({}, l, { bbox: Object.assign({}, l.bbox, { y0: l.bbox.y0 + pos[pi], y1: l.bbox.y1 + pos[pi] }) })));
+      });
+      return out;
+    };
+
+    const units = opts.layout === 'combined' ? [[].concat(...groups)] : groups;
+    const sections = units.map((unit, idx) => {
+      let lines;
+      if (opts.layout === 'combined') {
+        lines = [];
+        groups.forEach((g) => {
+          const gl = groupLines(g);
+          if (gl.length && lines.length) gl[0].pageBreak = true;
+          lines.push(...gl);
+        });
       } else {
-        sections[0].title = 'Content';
+        lines = groupLines(unit);
       }
-      sections[0].removedLines = overlaps.reduce((a, b) => a + b, 0);
-    } else {
-      sections = pageLines.map((lines, i) => {
-        const s = { id: 's' + (i + 1), sourceFiles: [pages[i].fileName], blocks: buildBlocks(lines), removedLines: overlaps[i] };
-        titleSection(s, i);
-        return s;
-      });
-      // A scrolling capture without its own heading continues the previous one.
-      sections.forEach((s, i) => {
-        if (i > 0 && s.removedLines && /^Screenshot \d+$/.test(s.title)) {
-          s.title = sections[i - 1].title.replace(/ \(continued\)$/, '') + ' (continued)';
-        }
-      });
-    }
-
-    sections.forEach((s, i) => {
-      const conf = pageLines[i] && opts.layout !== 'combined' ? pageLines[i] : [].concat(...pageLines);
-      s.confidence = conf.length ? Math.round(conf.reduce((a, l) => a + l.confidence, 0) / conf.length) : 0;
-      recomputeSection(s);
+      const W = pages[unit[0]].imageWidth;
+      const chat = looksLikeChat(lines, W) ? buildChatBlocks(lines, W, pages[unit[0]].imageHeight) : null;
+      const s = {
+        id: 's' + (idx + 1),
+        sourceFiles: unit.map((i) => pages[i].fileName),
+        blocks: chat ? chat.blocks : tidyBylines(buildBlocks(lines)),
+        removedLines: unit.reduce((a, i) => a + removed[i], 0),
+        confidence: lines.length ? Math.round(lines.reduce((a, l) => a + l.confidence, 0) / lines.length) : 0,
+      };
+      const chatTitle = chat ? (chat.name ? 'Conversation with ' + chat.name : 'Conversation') : null;
+      titleSection(s, idx, opts.layout === 'combined' && opts.title ? opts.title : chatTitle);
+      return recomputeSection(s);
     });
 
     const doc = {
@@ -556,7 +853,7 @@
     organize,
     extractLines,
     buildBlocks,
-    findOverlap,
+    similarity,
     extractHighlights,
     refreshHighlights,
     toMarkup,

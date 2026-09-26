@@ -234,6 +234,9 @@
       if (lang === 'eng') options.langPath = abs(LOCAL.lang);
     }
     ocrWorker = await Tesseract.createWorker(lang, 1, options);
+    // Automatic page layout: finds separate text areas (chat bubbles,
+    // captions, columns) instead of treating the screenshot as one block.
+    await ocrWorker.setParameters({ tessedit_pageseg_mode: '3' });
     ocrWorkerLang = lang;
     return ocrWorker;
   }
@@ -302,7 +305,12 @@
             text: l.text,
             bbox: l.bbox,
             confidence: l.confidence,
-            words: (l.words || []).map((w) => ({ symbols: (w.symbols || []).map((s) => ({ text: s.text, bbox: s.bbox })) })),
+            words: (l.words || []).map((w) => ({
+              text: w.text,
+              confidence: w.confidence,
+              bbox: w.bbox,
+              symbols: (w.symbols || []).map((s) => ({ text: s.text, bbox: s.bbox })),
+            })),
           })),
         })),
       })),
@@ -350,7 +358,7 @@
         try {
           const { canvas } = await prepareImage(item.file);
           const { data } = await ocrWorker.recognize(canvas, {}, { text: true, blocks: true });
-          item.ocr[lang] = { data: slimOcr(data), imageHeight: canvas.height };
+          item.ocr[lang] = { data: slimOcr(data), imageHeight: canvas.height, imageWidth: canvas.width };
           item.status = 'done';
           const words = (data.text || '').split(/\s+/).filter(Boolean).length;
           item.note = words ? '✓ ' + words + ' words found' : 'No text found';
@@ -366,7 +374,7 @@
       const readable = items.filter((it) => it.ocr[lang]);
       if (!readable.length) throw new Error('None of the screenshots could be read.');
 
-      const pages = readable.map((it) => ({ fileName: it.name, data: it.ocr[lang].data, imageHeight: it.ocr[lang].imageHeight }));
+      const pages = readable.map((it) => ({ fileName: it.name, data: it.ocr[lang].data, imageHeight: it.ocr[lang].imageHeight, imageWidth: it.ocr[lang].imageWidth }));
       doc = Organizer.organize(pages, {
         title: els.title.value.trim(),
         layout: els.layout.value,
@@ -377,8 +385,8 @@
       if (els.images.checked) {
         setProgress(1, 'Adding screenshots to the document…');
         const embeds = await Promise.all(readable.map((it) => makeEmbedImage(it.file)));
-        if (doc.sections.length === readable.length) doc.sections.forEach((s, i) => { s.images = [embeds[i]]; });
-        else doc.sections[doc.sections.length - 1].images = embeds;
+        const byName = new Map(readable.map((it, i) => [it.name, embeds[i]]));
+        doc.sections.forEach((s) => { s.images = s.sourceFiles.map((f) => byName.get(f)).filter(Boolean); });
       }
 
       showResult();

@@ -10,11 +10,12 @@ Upload one or many screenshots. The app reads the writing in them (OCR) and buil
 2. **Read the text**: each screenshot goes through [Tesseract.js](https://github.com/naptha/tesseract.js). Dark-mode screenshots are flipped to dark-on-light and small ones are enlarged first, which makes them easier to read.
 3. **Organize it**: the app works out the structure from the text itself:
    - **Headings** come from larger text. The biggest heading becomes the section title.
-   - **Bullet lists, numbered lists and checklists** (`•`, `1.`, `[ ]`, `[x]`, ☐ …).
+   - **Lists**: bullets, numbered items and checklists (`•`, `1.`, `[ ]`, `[x]`, ☐ …). A run of short lines, such as the ingredients in a recipe, also becomes a list.
    - **Paragraphs**: lines that wrap are joined back into full sentences.
    - **Labeled details** such as `Phone: 555-987-6543`.
-   - **Repeated text is removed** when you took several screenshots while scrolling down one long page.
-   - Phone **status bars** (clock, battery) are ignored.
+   - **Chats** (text messages, Messenger and similar) become a transcript: left bubbles are the other person, right bubbles are "Me".
+   - **Scrolling captures are joined**: screenshots of one long page are found automatically, put in the right order (even if you upload them out of order) and the repeated text is removed.
+   - **Screen clutter is dropped**: text "read" from photos, the phone status bar and navigation bar, app buttons ("Reply", "Like", "Write a comment…") and icons.
 4. **Review and download** the document. It is laid out like this:
    - Title, with a summary line (date, number of screenshots, word count)
    - **Contents**: a clickable list of sections

@@ -46,7 +46,9 @@
   }
 
   function safeFileName(title, ext) {
-    const base = String(title || 'screenshot-notes').replace(/[\\/:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim().slice(0, 80) || 'screenshot-notes';
+    // Browsers reject names with some characters or ending in dots ("delicious….docx").
+    const base = String(title || '').replace(/[\\/:*?"<>|…]+/g, '').replace(/[^\x20-\x7E\u00A0-\u024F]/g, '')
+      .replace(/\s+/g, ' ').trim().slice(0, 80).replace(/[.\s]+$/, '') || 'screenshot-notes';
     return base + '.' + ext;
   }
 
@@ -83,7 +85,7 @@
       s.blocks.forEach((b) => {
         switch (b.type) {
           case 'heading': out.push('#'.repeat(Math.min(b.level + 2, 6)) + ' ' + mdEscape(b.text)); break;
-          case 'paragraph': out.push(mdEscape(b.text)); break;
+          case 'paragraph': out.push(b.note ? '_' + mdEscape(b.text) + '_' : mdEscape(b.text)); break;
           case 'fields': b.items.forEach((f) => out.push('- **' + mdEscape(f.label) + ':** ' + mdEscape(f.value))); break;
           case 'list':
             b.items.forEach((it, n) => {
@@ -183,9 +185,9 @@
     return blocks.map((b) => {
       switch (b.type) {
         case 'heading': return '<h' + (b.level + 2) + '>' + linkify(b.text) + '</h' + (b.level + 2) + '>';
-        case 'paragraph': return '<p>' + linkify(b.text) + '</p>';
+        case 'paragraph': return '<p' + (b.note ? ' class="note"' : '') + '>' + linkify(b.text) + '</p>';
         case 'fields':
-          return '<dl class="fields">' + b.items.map((f) => '<dt>' + esc(f.label) + '</dt><dd>' + linkify(f.value) + '</dd>').join('') + '</dl>';
+          return '<dl class="fields' + (b.chat ? ' chat' : '') + '">' + b.items.map((f) => '<dt>' + esc(f.label) + '</dt><dd>' + linkify(f.value) + '</dd>').join('') + '</dl>';
         case 'list': {
           if (b.style === 'checklist') {
             return '<ul class="checklist">' + b.items.map((it) => '<li class="' + (it.checked ? 'done' : '') + '"><span class="box">' + (it.checked ? '☑' : '☐') + '</span> ' + linkify(it.text) + '</li>').join('') + '</ul>';
@@ -223,6 +225,8 @@
   dl.fields { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 10px 0; }
   dl.fields dt { font-weight: 600; color: #334e68; }
   dl.fields dd { margin: 0; }
+  dl.fields.chat { grid-template-columns: max-content 1fr; row-gap: 8px; }
+  p.note { text-align: center; color: #829ab1; font-size: .85rem; margin: 14px 0 6px; }
   ul.checklist { list-style: none; padding-left: 4px; }
   ul.checklist li.done { color: #7b8794; text-decoration: line-through; }
   .box { text-decoration: none; display: inline-block; }
@@ -363,7 +367,9 @@
             children.push(new D.Paragraph({ heading: H[Math.min(b.level, 3)], children: richRuns(D, b.text) }));
             break;
           case 'paragraph':
-            children.push(new D.Paragraph({ children: richRuns(D, b.text), spacing: { after: 160 } }));
+            children.push(b.note ?
+              new D.Paragraph({ alignment: D.AlignmentType.CENTER, children: [new D.TextRun({ text: b.text, italics: true, color: '829AB1', size: 18 })], spacing: { before: 120, after: 80 } }) :
+              new D.Paragraph({ children: richRuns(D, b.text), spacing: { after: 160 } }));
             break;
           case 'fields':
             b.items.forEach((f) => children.push(new D.Paragraph({
