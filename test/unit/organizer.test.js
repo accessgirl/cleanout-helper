@@ -89,6 +89,7 @@ test('extracts key details', () => {
     { text: 'Meet Saturday, October 12, 2026 at 9:00 AM near the park.', source: 0 },
     { text: 'Call (555) 123-4567 or +1 555-222-3333, email jo.b@mail.example.com', source: 0 },
     { text: 'Tickets $25.50 each at www.tickets.com/show, total 102 USD.', source: 1 },
+    { text: 'The fund has $20 Billion committed.', source: 1 },
     { text: 'Deadline 11/03/2026 and again 2026-12-01; doors open 7pm', source: 1 },
     { text: 'Email again: jo.b@mail.example.com', source: 1 },
   ]);
@@ -97,7 +98,7 @@ test('extracts key details', () => {
   assert.deepStrictEqual(get('phones'), ['(555) 123-4567', '+1 555-222-3333']);
   assert.deepStrictEqual(get('emails'), ['jo.b@mail.example.com']);
   assert.deepStrictEqual(get('links'), ['www.tickets.com/show']);
-  assert.deepStrictEqual(get('money'), ['$25.50', '102 USD']);
+  assert.deepStrictEqual(get('money'), ['$25.50', '102 USD', '$20 Billion']);
   const email = h.find((x) => x.key === 'emails').items[0];
   assert.deepStrictEqual(email.sources, [0, 1]);
 });
@@ -192,4 +193,48 @@ test('drops unreadable photo text and trims icons', () => {
   ] }] }] };
   const lines = O.extractLines(data, {});
   assert.deepStrictEqual(lines.map((l) => l.text), ['View the recipe', 'Sure. I will come']);
+});
+
+test('an indented bullet list is not mistaken for a chat', () => {
+  const W = 1080;
+  const ln = (text, x0, x1, y) => ({ text, confidence: 95, words: [], bbox: { x0, y0: y, x1, y1: y + 30 } });
+  const rows = [
+    ln('Additional housing programs are listed below today', 175, 900, 100),
+    ln('Purchase Program — provides the opportunity to', 232, 880, 200),
+    ln('purchase one to four-family and mixed-use units.', 232, 860, 250),
+    ln('Purchase & Renovation — provides the opportunity', 232, 870, 320),
+    ln('to purchase a property and renovate it after.', 232, 800, 370),
+    ln('HOT-PHA — provides people with a voucher to use', 232, 890, 440),
+    ln('these funds for the mortgage payment each month.', 232, 850, 490),
+  ];
+  const data = { blocks: rows.map((l) => ({ paragraphs: [{ lines: [l] }] })) };
+  const doc = O.organize([{ fileName: 'page.png', data, imageHeight: 2400, imageWidth: W }], {});
+  const s = doc.sections[0];
+  assert.ok(!/Conversation/.test(s.title));
+  assert.ok(!s.blocks.some((b) => b.type === 'fields'));
+});
+
+test('removes app overlays that stay put while the page scrolls', () => {
+  const word = (text, x0, y0) => ({ text, confidence: 95, bbox: { x0, y0, x1: x0 + text.length * 14, y1: y0 + 30 } });
+  const lineOf = (words) => ({
+    text: words.map((w) => w.text).join(' '), confidence: 95, words,
+    bbox: { x0: words[0].bbox.x0, y0: words[0].bbox.y0, x1: words[words.length - 1].bbox.x1, y1: words[0].bbox.y1 },
+  });
+  const shot = (texts) => ({ blocks: [{ paragraphs: [{ lines: [
+    ...texts.map((t, i) => lineOf(t.split(' ').map((w, k) => word(w, 100 + k * 120, 300 + i * 60)))),
+    lineOf([word('English', 250, 1700)]),
+    lineOf([word('NACA', 300, 2000), word('loan', 380, 2000), word('program', 460, 2000)]),
+  ] }] }] });
+  const doc = O.organize([
+    { fileName: 'a.png', data: shot(['First part of the page text', 'keeps going on this line']), imageHeight: 2400, imageWidth: 1080 },
+    { fileName: 'b.png', data: shot(['Something else entirely here', 'from another part of page']), imageHeight: 2400, imageWidth: 1080 },
+  ], {});
+  const text = doc.sections.map((s) => [s.title].concat(O.blockTexts(s.blocks)).join(' ')).join(' ');
+  assert.ok(!/English|loan program/.test(text), text);
+  assert.match(text, /keeps going/);
+});
+
+test('keeps real hyphens when joining wrapped lines', () => {
+  const blocks = O.parseMarkup('one to four-\nfamily homes and Pre-\nExisting ones');
+  assert.strictEqual(blocks[0].text, 'one to four-family homes and Pre-Existing ones');
 });

@@ -28,6 +28,7 @@
       .replace(/[​-‍﻿]/g, '')
       .replace(/[“”]/g, '"')
       .replace(/[‘’]/g, "'")
+      .replace(/'{2,}/g, "'")
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -44,6 +45,12 @@
   // Characters whose glyph reaches cap height without a descender. Their
   // height is a good estimate of font size regardless of the line's content.
   const CAP_CHARS = /[A-Z0-9bdfhklt]/;
+
+  function capSamples(line) {
+    let n = 0;
+    (line.words || []).forEach((w) => (w.symbols || []).forEach((sy) => { if (sy.bbox && CAP_CHARS.test(sy.text)) n++; }));
+    return n;
+  }
 
   function capHeight(line) {
     const heights = [];
@@ -93,6 +100,14 @@
   // App buttons and labels that are not part of the content.
   const UI_PHRASES = /^(?:reply|replies|like|likes|love|share|send|comment|comments|follow|following|message|translate|see more|see less|see translation|most relevant|newest|all comments|view (?:all |more )?(?:\d+ )?(?:more )?(?:replies|reply|comments?)|write a (?:comment|reply)|add a comment|type a message|imessage|text message|delivered|read|seen)$/i;
 
+  // Text that social/video apps and browsers draw over the content.
+  const OVERLAY_PATTERNS = [
+    /^\S+\.[a-z]{2,}\s*[—–-]\s*private$/i, // "naca.com — Private" (in-app browser)
+    /^follow (?:and|&|\+) (?:comment|share|like)\b/i, // "Follow and Comment "EIN" to get…"
+    /^(?:add a comment|write a comment|comment as)\b/i,
+    /^\d+(?:[.,]\d+)?[km]?\s*(?:likes?|comments?|shares?|views?|replies)$/i, // "14K likes"
+  ];
+
   // ------------------------------------------------------- OCR -> lines
 
   function wordText(w) {
@@ -121,16 +136,36 @@
       (block.paragraphs || []).forEach((para) => {
         paraId += 1;
         (para.lines || []).forEach((line) => {
-          let words = (line.words || []).filter((w) => wordText(w));
+          const skip = opts.skipWords;
+          const all = (line.words || []).filter((w) => wordText(w));
+          const dropped = (w) => (skip && skip.has(w)) || (typeof w.confidence === 'number' && w.confidence < 35);
+          let words = all.filter((w) => !dropped(w));
+          // The start of the line was hidden under an app overlay.
+          if (all.length && skip && skip.has(all[0]) && words.length) words.unshift({ text: '…', confidence: 99, bbox: all[0].bbox, gap: true });
+          // Mark where covered or unreadable words were taken out of a line.
+          all.forEach((w, i) => {
+            if (dropped(w) && alnumCount(w.text) >= 3 && i > 0 && i < all.length - 1 && !dropped(all[i - 1])) {
+              const next = words.indexOf(all.slice(i + 1).find((x) => !dropped(x)));
+              if (next > 0) words.splice(next, 0, { text: '…', confidence: 99, bbox: w.bbox, gap: true });
+            }
+          });
+          // Line was entirely an app overlay ("English", "Follow") → skip it.
+          if (all.length && all.every((w) => skip && skip.has(w))) return;
+          if (all.length && !words.length) return;
           // A capital I is often read as "|" ("| will bring…").
           words = words.map((w, i) => (wordText(w) === '|' && words[i + 1] && /^[a-z']/.test(wordText(words[i + 1])) ?
             Object.assign({}, w, { text: 'I', confidence: Math.max(w.confidence || 0, 85) }) : w));
           if (words.length && words.every((w) => typeof w.confidence === 'number')) {
             // Mostly unreadable → a photo, drawing or icon row, not text.
             if (median(words.map((w) => w.confidence)) < 60) return;
-            const weak = (w) => w.confidence < 60 || alnumCount(w.text) === 0;
+            const weak = (w) => !w.gap && (w.confidence < 60 || alnumCount(w.text) === 0);
             // Keep bullets and checkboxes at the start; drop other weak marks (icons, avatars).
-            while (words.length && weak(words[0]) && !MARKER_TOKEN.test(wordText(words[0]))) words.shift();
+            let cutWord = false;
+            while (words.length && weak(words[0]) && !MARKER_TOKEN.test(wordText(words[0]))) {
+              if (alnumCount(words[0].text) >= 4) cutWord = true; // a real word, partly hidden
+              words.shift();
+            }
+            if (cutWord && line.confidence >= 60 && words.length && !words[0].gap) words.unshift({ text: '…', confidence: 99, bbox: words[0].bbox, gap: true });
             while (words.length && weak(words[words.length - 1])) words.pop();
             if (!words.length) return;
           } else {
@@ -138,7 +173,7 @@
           }
           // Symbol-only "words" in the middle are usually icons (a verified badge, an emoji).
           if (words.length) {
-            words = words.filter((w, i) => i === 0 || i === words.length - 1 || w.confidence >= 85 ||
+            words = words.filter((w, i) => i === 0 || i === words.length - 1 || w.confidence >= 85 || w.gap ||
               /[\p{L}\p{N}&\-–—/+=:%$]/u.test(w.text) || (i === 1 && MARKER_TOKEN.test(wordText(w))));
           }
           const text = words.length ? cleanText(words.map(wordText).join(' ')) : cleanText(line.text);
@@ -146,6 +181,7 @@
           const alnum = alnumCount(text);
           // Drop OCR noise: icons, separators, specks.
           if (alnum === 0) return;
+          if (alnum === 1 && !/^\d$/.test(text)) return; // a lone letter is an icon (🔍 → "Q")
           if (alnum / text.replace(/\s/g, '').length < 0.4 && alnum < 4) return;
           if (line.confidence < 45 && alnum < 6) return;
           if (line.confidence < 25) return;
@@ -155,21 +191,27 @@
             { x0: words[0].bbox.x0, y0: lb.y0, x1: words[words.length - 1].bbox.x1, y1: lb.y1 } :
             { x0: lb.x0, y0: lb.y0, x1: lb.x1, y1: lb.y1 };
 
+          // A line cut in half by the top or bottom edge of the screenshot.
+          if (H && (bbox.y0 <= 2 || bbox.y1 >= H - 2) && line.confidence < 70) return;
+
           if (skipChrome) {
             // Phone status bar (clock, battery) and navigation bar.
             if (phoneShaped && bbox.y1 < H * 0.045) return;
             if (phoneShaped && bbox.y0 > H * 0.955 && text.length < 30) return;
             if (H && bbox.y1 < H * 0.06 && text.length < 30 && STATUS_TIME.test(text)) return;
             if (UI_PHRASES.test(text.replace(/[\s.…:!]+$/, ''))) return;
+            if (OVERLAY_PATTERNS.some((re) => re.test(text))) return;
           }
 
           const size = capHeight(line);
+          const sizeSamples = capSamples(line);
           const first = words[0];
           lines.push({
             text,
             norm: normalize(text),
             bbox,
             size,
+            sizeSamples,
             firstWordWidth: first && first.bbox ? first.bbox.x1 - first.bbox.x0 : (text.split(' ')[0].length * size * 0.7),
             confidence: line.confidence,
             blockId: (opts.page || 0) + ':' + blockId,
@@ -179,6 +221,51 @@
       });
     });
     return lines;
+  }
+
+  // ------------------------------------------------ fixed app overlays
+
+  /**
+   * Words drawn by the app on top of the content (a video's caption, a
+   * "Follow" button, a language pop-up) sit at exactly the same spot in
+   * every screenshot, while the content under them moves. Returns the set
+   * of such word objects so they can be skipped. Pairs of screenshots that
+   * are mostly identical (nothing moved) are ignored.
+   */
+  function findOverlayWords(pages) {
+    const pageWords = pages.map((p) => {
+      const out = [];
+      (p.data && p.data.blocks || []).forEach((b) => (b.paragraphs || []).forEach((pa) => (pa.lines || []).forEach((l) => (l.words || []).forEach((w) => {
+        const norm = normalize(w.text);
+        if (norm.length >= 2 && w.bbox) out.push({ w, norm, cx: (w.bbox.x0 + w.bbox.x1) / 2, cy: (w.bbox.y0 + w.bbox.y1) / 2 });
+      }))));
+      return out;
+    });
+    const overlay = new Set();
+    for (let i = 0; i < pages.length; i++) {
+      for (let j = i + 1; j < pages.length; j++) {
+        if (!pages[i].imageHeight || pages[i].imageHeight !== pages[j].imageHeight || pages[i].imageWidth !== pages[j].imageWidth) continue;
+        const tol = Math.max(3, pages[i].imageHeight * 0.0025);
+        const shared = [];
+        pageWords[i].forEach((a) => {
+          const b = pageWords[j].find((c) => c.norm === a.norm && Math.abs(c.cx - a.cx) <= tol * 2 && Math.abs(c.cy - a.cy) <= tol);
+          if (b) shared.push(a.w, b.w);
+        });
+        const smaller = Math.min(pageWords[i].length, pageWords[j].length) || 1;
+        if (shared.length / 2 < smaller * 0.5) shared.forEach((w) => overlay.add(w));
+      }
+    }
+    // An overlay seen twice may have been read in other screenshots too,
+    // slightly moved (a pop-up that shifts): catch those as well.
+    const known = [];
+    pageWords.forEach((ws) => ws.forEach((x) => { if (overlay.has(x.w)) known.push(x); }));
+    pages.forEach((p, i) => {
+      if (!p.imageHeight) return;
+      pageWords[i].forEach((x) => {
+        if (known.some((k) => k.norm === x.norm && Math.abs(k.cy - x.cy) <= p.imageHeight * 0.05 && Math.abs(k.cx - x.cx) <= (p.imageWidth || 0) * 0.03)) overlay.add(x.w);
+      });
+    });
+    return overlay;
   }
 
   // ------------------------------------------------ scrolling screenshots
@@ -306,7 +393,11 @@
       const sim = similarity(p.norm, line.norm);
       if (sim >= 0.6) removed++;
       if (line.confidence > p.confidence + 5 || (sim >= 0.6 && line.norm.length > p.norm.length + 2 && line.confidence >= p.confidence - 5)) {
-        Object.assign(p, { text: line.text, norm: line.norm, confidence: line.confidence, firstWordWidth: line.firstWordWidth });
+        Object.assign(p, {
+          text: line.text, norm: line.norm, confidence: line.confidence, firstWordWidth: line.firstWordWidth,
+          size: line.size, sizeSamples: line.sizeSamples,
+          bbox: Object.assign({}, p.bbox, { x0: line.bbox.x0, x1: line.bbox.x1 }),
+        });
       }
     });
     return { kept, removed };
@@ -348,15 +439,23 @@
     if (!W || lines.length < 4) return false;
     const blocks = { left: new Set(), right: new Set() };
     let rightEdge = false;
+    let left = 0;
+    let leftShort = 0;
     lines.forEach((l) => {
       const side = lineSide(l, W);
-      if (side === 'left' && l.bbox.x1 < W * 0.85) blocks.left.add(l.blockId);
-      if (side === 'right') {
+      if (side === 'left') {
+        left++;
+        blocks.left.add(l.blockId);
+        // A bubble on the left never stretches across most of the screen.
+        if (l.bbox.x1 < W * 0.8) leftShort++;
+      }
+      // A bubble on the right starts well away from the left edge.
+      if (side === 'right' && l.bbox.x0 > W * 0.25) {
         blocks.right.add(l.blockId);
         if (l.bbox.x1 > W * 0.8) rightEdge = true;
       }
     });
-    return rightEdge && blocks.left.size >= 2 && blocks.right.size >= 2;
+    return rightEdge && blocks.left.size >= 2 && blocks.right.size >= 2 && leftShort >= left * 0.8;
   }
 
   /** The contact's name shown centered near the top of a chat, if any. */
@@ -404,7 +503,9 @@
   // ------------------------------------------------------- lines -> blocks
 
   function joinText(a, b) {
-    if (/[A-Za-z]-$/.test(a) && /^[a-z]/.test(b)) return a.slice(0, -1) + b;
+    // Screens rarely split words, so a line ending in "-" is a real hyphen
+    // ("four-" + "family" → "four-family").
+    if (/[\p{L}\d]-$/u.test(a) && /^[\p{L}\d]/u.test(b)) return a + b;
     return a + ' ' + b;
   }
 
@@ -436,6 +537,7 @@
     const pageWidth = Math.max(...lines.map((l) => l.bbox.x1));
     const colTol = Math.max(12, pageWidth * 0.03);
     const charWidth = median(lines.map((l) => (l.bbox.x1 - l.bbox.x0) / Math.max(1, l.text.length))) || bodySize * 0.6;
+    const leftMost = Math.min(...lines.map((l) => l.bbox.x0));
     // Right edge of the text column a line belongs to, or null when the
     // column doesn't look like wrapped text (it must be reasonably wide and
     // at least two lines must reach its edge).
@@ -457,13 +559,31 @@
       const last = logical[logical.length - 1];
       const space = bodySize * 0.6;
       const wrapped = prev && !bigGap && last && !last.heading &&
-        line.size < prev.size * 1.1 && !isAllCapsLabel(line.text) &&
+        // (size estimates from only a couple of tall letters are unreliable)
+        (line.size < prev.size + bodySize * 0.2 || (line.sizeSamples || 9) < 3 || (prev.sizeSamples || 9) < 3) &&
+        !isAllCapsLabel(line.text) &&
         !isListMarker(line.text) && classifyLine(line.text).kind !== 'field' &&
-        (Math.abs(line.bbox.x0 - prev.bbox.x0) <= colTol || (last.marker && line.bbox.x0 > last.x0)) &&
-        rightEdge(prev) !== null && rightEdge(prev) - prev.bbox.x1 < line.firstWordWidth + space;
-      if (wrapped) {
+        (Math.abs(line.bbox.x0 - prev.bbox.x0) <= colTol || (last.marker && line.bbox.x0 > last.x0) ||
+          // starts further right but lowercase: its beginning was covered or cut off
+          (line.bbox.x0 > prev.bbox.x0 && /^[a-z…]/.test(line.text))) &&
+        (() => {
+          // A bullet's continuation lines line up with the bullet's text, not the bullet.
+          const edge = rightEdge(last.marker && line.bbox.x0 > prev.bbox.x0 && Math.abs(line.bbox.x0 - prev.bbox.x0) < charWidth * 6 ? line : prev);
+          return edge !== null && edge - prev.bbox.x1 < line.firstWordWidth + space;
+        })();
+      // Two lines centered on each other (a button or title spread over two lines).
+      const centered = prev && !bigGap && last && !last.marker && !isListMarker(line.text) &&
+        Math.abs(line.size - prev.size) < bodySize * 0.25 &&
+        prev.bbox.x0 > leftMost + charWidth * 3 && line.bbox.x0 > leftMost + charWidth * 3 &&
+        Math.abs((line.bbox.x0 + line.bbox.x1) / 2 - (prev.bbox.x0 + prev.bbox.x1) / 2) < charWidth * 1.5 &&
+        Math.abs(line.bbox.x0 - prev.bbox.x0) > charWidth * 1.5 &&
+        line.bbox.y0 - prev.bbox.y1 < (prev.bbox.y1 - prev.bbox.y0) * 0.8;
+      if (centered && !wrapped && last.heading) last.heading = 0;
+      if (wrapped || centered) {
         last.text = joinText(last.text, line.text);
         last.lastY1 = line.bbox.y1;
+        last.x1 = Math.max(last.x1, line.bbox.x1);
+        last.lines += 1;
         return;
       }
       const ratio = line.size / bodySize;
@@ -478,6 +598,8 @@
         heading,
         marker: isListMarker(line.text),
         x0: line.bbox.x0,
+        x1: line.bbox.x1,
+        lines: 1,
         bigGap,
         newBlock: prev && prev.blockId !== line.blockId && gap > typicalGap * 1.3,
         blockId: line.blockId,
@@ -492,11 +614,15 @@
     const flush = () => { if (current) blocks.push(current); current = null; };
     const flushRun = () => {
       if (!run.length) return;
+      // A list: several lines that stop well short of the column's width
+      // (a paragraph whose lines weren't joined would fill the width).
+      const colRight = Math.max(...run.map((l) => l.x1));
       const short = run.filter((l) => l.text.length <= 80).length;
-      if (run.length >= 3 && short >= run.length * 0.66) {
+      const full = run.filter((l) => l.lines === 1 && l.x1 >= colRight - charWidth * 3).length;
+      if (run.length >= 3 && short >= run.length * 0.66 && full < run.length * 0.6) {
         blocks.push({ type: 'list', style: 'bullet', items: run.map((l) => ({ text: l.text })) });
       } else {
-        run.forEach((l) => blocks.push({ type: 'paragraph', text: l.text }));
+        run.forEach((l) => blocks.push({ type: 'paragraph', text: l.text, _x0: l.x0 }));
       }
       run = [];
     };
@@ -543,7 +669,36 @@
     });
     flush();
     flushRun();
-    return blocks;
+
+    // 3. Paragraphs indented from the page's text margin, one after another,
+    //    are list items whose bullet symbol wasn't readable.
+    const margins = lines.map((l) => l.bbox.x0).sort((a, b) => a - b);
+    const margin = margins.find((x) => margins.filter((y) => Math.abs(y - x) <= colTol).length >= 2);
+    const indented = (b) => b.type === 'paragraph' && margin !== undefined && b._x0 > margin + charWidth * 2.5 && b._x0 < margin + charWidth * 12;
+    const out = [];
+    for (let i = 0; i < blocks.length; i++) {
+      const prevOut = out[out.length - 1];
+      // A bullet whose symbol wasn't read, right after the rest of its list.
+      if (indented(blocks[i]) && prevOut && prevOut.type === 'list' && prevOut.style === 'bullet') {
+        prevOut.items.push({ text: blocks[i].text });
+        continue;
+      }
+      // Two pieces of the same kind of list with nothing between them.
+      if (blocks[i].type === 'list' && prevOut && prevOut.type === 'list' && prevOut.style === blocks[i].style) {
+        prevOut.items.push(...blocks[i].items);
+        continue;
+      }
+      if (indented(blocks[i]) && indented(blocks[i + 1] || {})) {
+        const list = { type: 'list', style: 'bullet', items: [] };
+        while (i < blocks.length && indented(blocks[i])) list.items.push({ text: blocks[i++].text });
+        i--;
+        out.push(list);
+      } else {
+        out.push(blocks[i]);
+      }
+    }
+    out.forEach((b) => { delete b._x0; });
+    return out;
   }
 
   // ---------------------------------------------------------- key details
@@ -586,7 +741,7 @@
       key: 'money',
       label: 'Money amounts',
       patterns: [
-        /(?:[$€£¥]\s?\d[\d,]*(?:\.\d{1,2})?)(?!\d)/g,
+        /(?:[$€£¥]\s?\d[\d,]*(?:\.\d{1,2})?)(?!\d)(?:\s?(?:thousand|million|billion|trillion|[KMB]\b))?/gi,
         /\b\d[\d,]*(?:\.\d{2})?\s?(?:USD|EUR|GBP|CAD|AUD|dollars)\b/gi,
       ],
     },
@@ -726,8 +881,15 @@
       section.title = truncate(first.text, 70);
       section.blocks = section.blocks.slice(1);
     } else {
-      const text = blockTexts(section.blocks).find((t) => (t.match(/[\p{L}\p{N}]+/gu) || []).length >= 5);
-      section.title = text ? shortTitle(text) : 'Screenshot ' + (index + 1);
+      // Otherwise: if the text starts properly, its first sentence; if it starts
+      // mid-sentence (the middle of a page), the first heading further down.
+      const body = section.blocks.filter((b) => !b.byline && !b.note);
+      const sentence = (t) => /^[\p{Lu}\d"']/u.test(t) && (t.match(/[\p{L}\p{N}]+/gu) || []).length >= 5;
+      const firstText = blockTexts(body.slice(0, 1))[0] || '';
+      const heading = section.blocks.find((b) => b.type === 'heading');
+      const text = blockTexts(body).find(sentence);
+      if (heading && !sentence(firstText)) section.title = truncate(heading.text, 70);
+      else section.title = text ? shortTitle(text) : heading ? truncate(heading.text, 70) : 'Screenshot ' + (index + 1);
     }
   }
 
@@ -737,7 +899,7 @@
     let t = (sentences.find((x) => x.split(/\s+/).length >= 4) || text).replace(/[.!?:;,]+$/, '');
     // "Cheesy BBQ Chicken sliders are a super easy dinner" → "Cheesy BBQ Chicken sliders"
     const subject = t.match(/^(\S+(?:\s+\S+){1,6}?)\s+(?:is|are|was|were|makes?|has|have)\s/i);
-    if (subject && /^\p{Lu}/u.test(subject[1])) return subject[1];
+    if (subject && /^\p{Lu}/u.test(subject[1]) && t.split(/\s+/).length >= 9) return subject[1];
     if (t.length > 60) t = t.slice(0, 60).replace(/\s+\S*$/, '') + '…';
     return t;
   }
@@ -758,8 +920,9 @@
    */
   function organize(pages, opts) {
     opts = Object.assign({ layout: 'per-screenshot', removeOverlap: true, ignoreStatusBar: true, autoOrder: true }, opts);
+    const skipWords = opts.ignoreStatusBar !== false && pages.length > 1 ? findOverlayWords(pages) : null;
     const pageLines = pages.map((p, i) => extractLines(p.data, {
-      imageHeight: p.imageHeight, imageWidth: p.imageWidth, ignoreStatusBar: opts.ignoreStatusBar, page: i,
+      imageHeight: p.imageHeight, imageWidth: p.imageWidth, ignoreStatusBar: opts.ignoreStatusBar, page: i, skipWords,
     }));
 
     let groups = pages.map((_, i) => [i]);
@@ -792,6 +955,12 @@
       g.forEach((pi) => {
         pageLines[pi].forEach((l) => out.push(Object.assign({}, l, { bbox: Object.assign({}, l.bbox, { y0: l.bbox.y0 + pos[pi], y1: l.bbox.y1 + pos[pi] }) })));
       });
+      // Joined screenshots: a line only readable in the later screenshot
+      // (hidden by a pop-up in the earlier one) belongs in its place on the page.
+      if (g.length > 1) {
+        const order = new Map(out.map((l, i) => [l, i]));
+        out.sort((a, b) => (Math.abs(a.bbox.y0 - b.bbox.y0) < (a.bbox.y1 - a.bbox.y0) * 0.5 ? order.get(a) - order.get(b) : a.bbox.y0 - b.bbox.y0));
+      }
       return out;
     };
 
