@@ -16,6 +16,7 @@ Upload one or many screenshots. The app reads the writing in them (OCR) and buil
    - **Chats** (text messages, Messenger and similar) become a transcript: left bubbles are the other person, right bubbles are "Me".
    - **Scrolling captures are joined**: screenshots of one long page are found automatically, put in the right order (even if you upload them out of order) and the repeated text is removed.
    - **Screen clutter is dropped**: text "read" from photos, the phone status bar and navigation bar, app buttons ("Reply", "Like", "Write a comment…") and icons.
+   - **Only certain details**: instead of the whole text, you can ask for just websites and links, phone numbers, email addresses, dates, money amounts, and/or lines that mention words you type. This is handy when you saved a screenshot only for the web address someone showed in a video. Overlays and captions are searched too, and each item says which screenshot it came from.
 4. **Review and download** the document. It is laid out like this:
    - Title, with a summary line (date, number of screenshots, word count)
    - **Contents**: a clickable list of sections

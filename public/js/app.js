@@ -38,6 +38,9 @@
     overlap: $('#opt-overlap'),
     statusbar: $('#opt-statusbar'),
     images: $('#opt-images'),
+    keepDetails: $('#keep-details'),
+    keywords: $('#opt-keywords'),
+    layoutField: $('#layout-field'),
     run: $('#run'),
     runHint: $('#run-hint'),
     progress: $('#progress'),
@@ -324,14 +327,35 @@
 
   function setBusy(value) {
     busy = value;
-    [els.title, els.layout, els.lang, els.overlap, els.statusbar, els.images, els.sortName, els.clearAll, els.fileInput]
+    [els.title, els.layout, els.lang, els.overlap, els.statusbar, els.images, els.sortName, els.clearAll, els.fileInput, els.keywords]
+      .concat(Array.from(document.querySelectorAll('input[name="keep"], input[name="kind"]')))
       .forEach((el) => { el.disabled = value; });
     els.dropzone.classList.toggle('disabled', value);
     renderThumbs();
   }
 
+  /** null for "everything", else { kinds, keywords } for "only certain details". */
+  function keepSettings() {
+    if (document.querySelector('input[name="keep"]:checked').value !== 'only') return null;
+    return {
+      kinds: Array.from(document.querySelectorAll('input[name="kind"]:checked')).map((c) => c.value),
+      keywords: els.keywords.value.split(',').map((k) => k.trim()).filter(Boolean),
+    };
+  }
+
+  function updateKeepUI() {
+    const only = Boolean(keepSettings());
+    els.keepDetails.hidden = !only;
+    els.layoutField.hidden = only;
+  }
+
   async function run() {
     if (busy || !items.length) return;
+    const wanted = keepSettings();
+    if (wanted && !wanted.kinds.length && !wanted.keywords.length) {
+      toast('Tick at least one kind of detail, or type words to look for.', true);
+      return;
+    }
     const lang = els.lang.value;
     setBusy(true);
     els.progress.hidden = false;
@@ -375,12 +399,14 @@
       if (!readable.length) throw new Error('None of the screenshots could be read.');
 
       const pages = readable.map((it) => ({ fileName: it.name, data: it.ocr[lang].data, imageHeight: it.ocr[lang].imageHeight, imageWidth: it.ocr[lang].imageWidth }));
-      doc = Organizer.organize(pages, {
+      const organizeOpts = {
         title: els.title.value.trim(),
         layout: els.layout.value,
         removeOverlap: els.overlap.checked,
         ignoreStatusBar: els.statusbar.checked,
-      });
+      };
+      const wanted = keepSettings();
+      doc = wanted ? Organizer.extractDetails(pages, Object.assign(organizeOpts, wanted)) : Organizer.organize(pages, organizeOpts);
 
       if (els.images.checked) {
         setProgress(1, 'Adding screenshots to the document…');
@@ -407,10 +433,15 @@
   // --------------------------------------------------------------- result
 
   function renderStats() {
-    const shots = doc.sections.reduce((a, s) => a + s.sourceFiles.length, 0);
+    const shots = doc.screenshotCount || doc.sections.reduce((a, s) => a + s.sourceFiles.length, 0);
     const removed = doc.sections.reduce((a, s) => a + (s.removedLines || 0), 0);
-    const details = (doc.highlights || []).reduce((a, h) => a + h.items.length, 0);
-    const chips = [
+    const details = doc.mode === 'extract' ?
+      doc.sections.reduce((a, s) => a + s.blocks.reduce((b, bl) => b + (bl.type === 'list' ? bl.items.length : 0), 0), 0) :
+      (doc.highlights || []).reduce((a, h) => a + h.items.length, 0);
+    const chips = doc.mode === 'extract' ? [
+      shots + ' screenshot' + (shots === 1 ? '' : 's'),
+      details + ' item' + (details === 1 ? '' : 's') + ' found',
+    ] : [
       shots + ' screenshot' + (shots === 1 ? '' : 's'),
       doc.wordCount + ' words',
       doc.sections.length + ' section' + (doc.sections.length === 1 ? '' : 's'),
@@ -598,6 +629,8 @@
     if (doc && !confirm('Rebuild the document? Any edits you made to the text will be replaced.')) return;
     run();
   });
+  document.querySelectorAll('input[name="keep"]').forEach((r) => r.addEventListener('change', updateKeepUI));
+  updateKeepUI();
   els.tabPreview.addEventListener('click', () => selectTab('preview'));
   els.tabEdit.addEventListener('click', () => selectTab('edit'));
   els.editTitle.addEventListener('input', () => { doc.title = els.editTitle.value || 'Untitled'; onEdited(); });

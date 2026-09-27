@@ -238,3 +238,31 @@ test('keeps real hyphens when joining wrapped lines', () => {
   const blocks = O.parseMarkup('one to four-\nfamily homes and Pre-\nExisting ones');
   assert.strictEqual(blocks[0].text, 'one to four-family homes and Pre-Existing ones');
 });
+
+test('"only certain details" finds links, including ones only shown in overlays', () => {
+  const ln = (text, y) => ({ text, confidence: 95, words: [], bbox: { x0: 40, y0: y, x1: 600, y1: y + 30 } });
+  const data = { blocks: [{ paragraphs: [{ lines: [
+    ln('Apply through the loan program today', 300),
+    ln('Call 555-222-3333 for help with the loan', 360),
+    ln('naca . com — Private', 1850), // the in-app browser bar, removed from the text itself
+  ] }] }] };
+  const pages = [{ fileName: 'reel.png', data, imageHeight: 2400, imageWidth: 1080 }];
+
+  const doc = O.extractDetails(pages, { kinds: ['links'], keywords: [] });
+  assert.strictEqual(doc.title, 'Websites from My Screenshots');
+  assert.deepStrictEqual(doc.sections.map((s) => s.title), ['Websites & links']);
+  assert.deepStrictEqual(doc.sections[0].blocks[0].items.map((i) => i.text), ['naca.com  (found in: reel.png)']);
+  assert.deepStrictEqual(doc.highlights, []);
+
+  const more = O.extractDetails(pages, { kinds: ['phones', 'emails'], keywords: ['loan'] });
+  assert.deepStrictEqual(more.sections.map((s) => s.title), ['Phone numbers', 'Email addresses', 'Mentions of "loan"']);
+  assert.deepStrictEqual(more.sections[0].blocks[0].items.map((i) => i.text), ['555-222-3333  (found in: reel.png)']);
+  assert.strictEqual(more.sections[1].blocks[0].text, 'None found in these screenshots.');
+  // Both lines mention "loan" (they read as one wrapped paragraph here).
+  assert.match(O.blockTexts(more.sections[2].blocks).join(' '), /Apply through the loan program.*help with the loan/);
+
+  // In the full document the overlay's website still shows up in Key Details.
+  const full = O.organize(pages, {});
+  assert.ok(!O.blockTexts(full.sections[0].blocks).some((t) => /naca/.test(t)));
+  assert.deepStrictEqual(full.highlights.find((h) => h.key === 'links').items.map((i) => i.value), ['naca.com']);
+});

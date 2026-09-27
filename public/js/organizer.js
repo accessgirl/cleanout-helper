@@ -200,7 +200,7 @@
             if (phoneShaped && bbox.y0 > H * 0.955 && text.length < 30) return;
             if (H && bbox.y1 < H * 0.06 && text.length < 30 && STATUS_TIME.test(text)) return;
             if (UI_PHRASES.test(text.replace(/[\s.…:!]+$/, ''))) return;
-            if (OVERLAY_PATTERNS.some((re) => re.test(text))) return;
+            if (OVERLAY_PATTERNS.some((re) => re.test(fixUrlSpacing(text)))) return;
           }
 
           const size = capHeight(line);
@@ -734,7 +734,7 @@
       label: 'Websites & links',
       patterns: [
         /\b(?:https?:\/\/|www\.)[^\s<>"'()]+/gi,
-        /(?<![@\w.\/-])(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|io|co|us|uk|ca|app|dev|info|biz|me)(?:\/[^\s<>"'()]*)?(?![\w@])/gi,
+        /(?<![@\w.\/-])(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|mil|io|co|us|uk|ca|au|app|dev|info|biz|me|ai|tv|ly|gg|xyz|shop|store|site|online|tech|link|page|blog|news|health|finance|money|club|live)(?:\/[^\s<>"'()]*)?(?![\w@])/gi,
       ],
     },
     {
@@ -991,10 +991,21 @@
       return recomputeSection(s);
     });
 
+    // Websites shown in overlays (a caption, a browser bar) were left out of
+    // the text but still belong in Key Details.
+    const linkDetector = DETECTORS.find((d) => d.key === 'links');
+    const extraEntries = [];
+    rawLines(pages).forEach((e) => {
+      if (!linkDetector.patterns.some((re) => { re.lastIndex = 0; return re.test(e.text); })) return;
+      const idx = sections.findIndex((sec) => sec.sourceFiles.includes(e.source));
+      extraEntries.push({ text: e.text, source: idx < 0 ? 0 : idx, linksOnly: true });
+    });
+
     const doc = {
       title: opts.title || guessTitle(sections),
       createdAt: new Date().toISOString(),
       sections,
+      extraEntries,
     };
     refreshHighlights(doc);
     return doc;
@@ -1012,14 +1023,111 @@
       entries.push({ text: s.title, source: idx });
       blockTexts(s.blocks).forEach((t) => entries.push({ text: t, source: idx }));
     });
-    doc.highlights = extractHighlights(entries);
+    // In "only certain details" mode the whole document already is the details.
+    doc.highlights = doc.mode === 'extract' ? [] : extractHighlights(entries);
+    const extra = extractHighlights((doc.extraEntries || []).filter((e) => e.source < doc.sections.length)).find((h) => h.key === 'links');
+    if (extra && doc.mode !== 'extract') {
+      let links = doc.highlights.find((h) => h.key === 'links');
+      if (!links) {
+        links = { key: 'links', label: extra.label, items: [] };
+        doc.highlights.splice(Math.min(3, doc.highlights.length), 0, links);
+      }
+      extra.items.forEach((it) => {
+        if (!links.items.some((x) => x.value.toLowerCase() === it.value.toLowerCase())) links.items.push(it);
+      });
+    }
     doc.sections.forEach(recomputeSection);
     doc.wordCount = doc.sections.reduce((a, s) => a + s.wordCount, 0);
     return doc;
   }
 
+  // ------------------------------------------------ "only certain details"
+
+  /** Undo common OCR spacing mistakes in web addresses ("naca . com"). */
+  function fixUrlSpacing(text) {
+    return text
+      .replace(/\b(https?)\s*:\s*\/\s*\//gi, '$1://')
+      .replace(/\bwww\s*\.\s*/gi, 'www.')
+      .replace(/([a-z0-9])\s*\.\s*(com|org|net|gov|edu|io|co|us|app|dev|ai|info|biz|me|tv)\b/gi, '$1.$2');
+  }
+
+  /**
+   * Every line of text the reader saw, including app overlays, captions and
+   * browser bars (a website is often shown in exactly those places).
+   */
+  function rawLines(pages) {
+    const out = [];
+    pages.forEach((p) => {
+      (p.data && p.data.blocks || []).forEach((b) => (b.paragraphs || []).forEach((pa) => (pa.lines || []).forEach((l) => {
+        const words = (l.words || []).filter((w) => wordText(w) && !(typeof w.confidence === 'number' && w.confidence < 50));
+        const text = fixUrlSpacing(cleanText(words.length ? words.map(wordText).join(' ') : (l.words && l.words.length ? '' : l.text)));
+        if (alnumCount(text) >= 3) out.push({ text, source: p.fileName });
+      })));
+    });
+    return out;
+  }
+
+  const KIND_LABELS = { links: 'Websites & links', phones: 'Phone numbers', emails: 'Email addresses', dates: 'Dates & times', money: 'Money amounts' };
+
+  /**
+   * Build a short document holding only the requested details.
+   * @param {Array} pages  as for organize()
+   * @param {object} opts  { kinds: ['links', …], keywords: ['loan', …], title, …organize options }
+   */
+  function extractDetails(pages, opts) {
+    opts = Object.assign({ kinds: ['links'], keywords: [] }, opts);
+    const full = organize(pages, Object.assign({}, opts, { title: '' }));
+    const entries = [];
+    full.sections.forEach((s) => blockTexts(s.blocks).concat(s.title).forEach((t) => {
+      entries.push({ text: fixUrlSpacing(t), source: s.sourceFiles.join(', ') });
+    }));
+    const raw = rawLines(pages);
+    raw.forEach((e) => entries.push(e));
+    const found = extractHighlights(entries);
+    const sourcesOf = (list) => [...new Set(list.join(', ').split(', '))].join(', ');
+
+    const sections = [];
+    opts.kinds.forEach((kind) => {
+      const h = found.find((f) => f.key === kind);
+      const blocks = h ? [{ type: 'list', style: 'bullet', items: h.items.map((it) => ({ text: it.value + '  (found in: ' + sourcesOf(it.sources) + ')' })) }] :
+        [{ type: 'paragraph', text: 'None found in these screenshots.' }];
+      sections.push({ title: KIND_LABELS[kind] || kind, blocks, sourceFiles: [] });
+    });
+
+    opts.keywords.map((k) => k.trim()).filter(Boolean).forEach((keyword) => {
+      const re = new RegExp(keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'), 'i');
+      const hits = [];
+      const seen = [];
+      entries.forEach((e) => {
+        if (!re.test(e.text)) return;
+        const norm = normalize(e.text);
+        // Organized paragraphs come first; skip raw lines they already contain.
+        if (seen.some((x) => x.includes(norm))) return;
+        seen.push(norm);
+        hits.push({ text: e.text + '  (found in: ' + sourcesOf([e.source]) + ')' });
+      });
+      sections.push({
+        title: 'Mentions of "' + keyword + '"',
+        blocks: hits.length ? [{ type: 'list', style: 'bullet', items: hits }] : [{ type: 'paragraph', text: 'Not mentioned in these screenshots.' }],
+        sourceFiles: [],
+      });
+    });
+
+    sections.forEach((s, i) => { s.id = 's' + (i + 1); s.removedLines = 0; s.confidence = 0; recomputeSection(s); });
+    const onlyLinks = opts.kinds.length === 1 && opts.kinds[0] === 'links' && !opts.keywords.length;
+    const doc = {
+      title: opts.title || (onlyLinks ? 'Websites from My Screenshots' : 'Details from My Screenshots'),
+      createdAt: new Date().toISOString(),
+      mode: 'extract',
+      screenshotCount: pages.length,
+      sections,
+    };
+    return refreshHighlights(doc);
+  }
+
   return {
     organize,
+    extractDetails,
     extractLines,
     buildBlocks,
     similarity,
