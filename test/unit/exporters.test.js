@@ -56,6 +56,9 @@ test('html escapes text and links urls/emails', () => {
   assert.match(html, /<a href="mailto:sam@example.com">/);
   assert.match(html, /<a href="https:\/\/donate.example.org\/pickup">https:\/\/donate.example.org\/pickup<\/a>\./);
   assert.match(html, /<nav class="toc">/);
+  const bare = E.toHtml({ title: 'T', sections: [{ title: 'S', sourceFiles: [], blocks: [{ type: 'paragraph', text: 'See naca.com (found in: a.png) or www.x.org/y.' }] }] });
+  assert.match(bare, /<a href="https:\/\/naca.com">naca.com<\/a> \(found in: a.png\)/);
+  assert.match(bare, /<a href="https:\/\/www.x.org\/y">www.x.org\/y<\/a>\./);
   assert.match(html, /class="glance"/);
 });
 

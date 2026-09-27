@@ -79,6 +79,23 @@ test('upload screenshots, build and export a document', { skip: !playwright && '
       else assert.match(buf.toString(), /555-000-1111/);
     }
 
+    // "Only certain details": just the website and phone numbers, plus a word.
+    await page.check('input[name="keep"][value="only"]');
+    assert.ok(await page.isHidden('#layout-field'));
+    await page.check('input[name="kind"][value="phones"]');
+    await page.fill('#opt-keywords', 'truck');
+    page.once('dialog', (d) => d.accept());
+    await page.click('#run');
+    await page.waitForFunction(() => window.ScreenshotApp.doc && window.ScreenshotApp.doc.mode === 'extract', null, { timeout: 60000 });
+    const only = await page.evaluate(() => window.ScreenshotApp.doc);
+    assert.deepStrictEqual(only.sections.map((s) => s.title), ['Websites & links', 'Phone numbers', 'Mentions of "truck"']);
+    const values = only.sections.map((s) => s.blocks[0].items ? s.blocks[0].items.map((i) => i.text.split('  (')[0]) : []);
+    assert.deepStrictEqual(values[0], ['https://donate.example.org/pickup']);
+    assert.deepStrictEqual(values[1], ['(555) 123-4567', '555-987-6543', '(555) 214-7788']);
+    assert.ok(values[2].length >= 2);
+    const [dlOnly] = await Promise.all([page.waitForEvent('download'), page.click('[data-export="txt"]')]);
+    assert.strictEqual(dlOnly.suggestedFilename(), 'My Cleanout Notes.txt');
+
     assert.deepStrictEqual(errors, []);
     assert.deepStrictEqual(external, [], 'everything is served locally');
   } finally {

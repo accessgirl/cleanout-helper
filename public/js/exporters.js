@@ -26,7 +26,7 @@
   }
 
   function summaryLine(doc) {
-    const shots = doc.sections.reduce((a, s) => a + (s.sourceFiles ? s.sourceFiles.length : 1), 0);
+    const shots = doc.screenshotCount || doc.sections.reduce((a, s) => a + (s.sourceFiles ? s.sourceFiles.length : 1), 0);
     return 'Created ' + formatDate(doc.createdAt) + ' from ' + plural(shots, 'screenshot') +
       ' · ' + plural(doc.wordCount || 0, 'word');
   }
@@ -174,11 +174,35 @@
     return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  // Web addresses (with or without https:// or www.) and email addresses.
+  const LINK_RE = new RegExp([
+    /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}/.source, // email
+    /https?:\/\/[^\s<>"']*[^\s<>"'.,;:!?)]/.source,
+    /www\.[^\s<>"']*[^\s<>"'.,;:!?)]/.source,
+    /(?:[a-z0-9-]+\.)+(?:com|org|net|edu|gov|io|co|us|uk|ca|app|dev|info|biz|me|ai|tv|ly|xyz|shop|store|site|online)(?:\/[^\s<>"']*[^\s<>"'.,;:!?)])?/.source,
+  ].join('|'), 'gi');
+
+  /** Split text into [{text, href?}] pieces, turning addresses into links. */
+  function linkParts(text) {
+    const parts = [];
+    let last = 0;
+    let m;
+    LINK_RE.lastIndex = 0;
+    while ((m = LINK_RE.exec(text))) {
+      const before = text[m.index - 1];
+      if (before && /[\w@./-]/.test(before)) continue; // part of a longer word
+      if (m.index > last) parts.push({ text: text.slice(last, m.index) });
+      const v = m[0];
+      const href = v.includes('@') && !/^https?:/i.test(v) ? 'mailto:' + v : /^https?:/i.test(v) ? v : 'https://' + v;
+      parts.push({ text: v, href });
+      last = m.index + v.length;
+    }
+    if (last < text.length) parts.push({ text: text.slice(last) });
+    return parts;
+  }
+
   function linkify(text) {
-    return esc(text)
-      .replace(/\b(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)])/gi, '<a href="$1">$1</a>')
-      .replace(/(^|[\s(])(www\.[^\s<>"']+[^\s<>"'.,;:!?)])/gi, '$1<a href="https://$2">$2</a>')
-      .replace(/\b([\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,})\b/g, '<a href="mailto:$1">$1</a>');
+    return linkParts(String(text)).map((p) => (p.href ? '<a href="' + esc(p.href) + '">' + esc(p.text) + '</a>' : esc(p.text))).join('');
   }
 
   function blocksToHtml(blocks) {
@@ -286,18 +310,9 @@
   /** Split text into TextRuns / hyperlinks so links are clickable in Word. */
   function richRuns(D, text, runOpts) {
     runOpts = runOpts || {};
-    const re = /(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)]|[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,})/g;
-    const runs = [];
-    let last = 0;
-    let m;
-    while ((m = re.exec(text))) {
-      if (m.index > last) runs.push(new D.TextRun(Object.assign({ text: text.slice(last, m.index) }, runOpts)));
-      const link = m[0].includes('@') && !/^https?:/i.test(m[0]) ? 'mailto:' + m[0] : m[0];
-      runs.push(new D.ExternalHyperlink({ link, children: [new D.TextRun(Object.assign({ text: m[0], style: 'Hyperlink' }, runOpts))] }));
-      last = m.index + m[0].length;
-    }
-    if (last < text.length) runs.push(new D.TextRun(Object.assign({ text: text.slice(last) }, runOpts)));
-    return runs;
+    return linkParts(String(text)).map((p) => (p.href ?
+      new D.ExternalHyperlink({ link: p.href, children: [new D.TextRun(Object.assign({ text: p.text, style: 'Hyperlink' }, runOpts))] }) :
+      new D.TextRun(Object.assign({ text: p.text }, runOpts))));
   }
 
   /**

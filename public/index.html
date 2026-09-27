@@ -42,11 +42,31 @@
     <section class="card" id="step-options" aria-labelledby="h-options">
       <h2 id="h-options"><span class="step">2</span> Choose options</h2>
       <div class="options">
+        <fieldset class="keep" id="keep">
+          <legend>What do you want from the screenshots?</legend>
+          <label class="choice"><input type="radio" name="keep" value="all" checked>
+            <span><strong>Everything</strong>: all the text, organized into a document</span></label>
+          <label class="choice"><input type="radio" name="keep" value="only">
+            <span><strong>Only certain details</strong>: for example just the website shown in a video</span></label>
+          <div class="keep-details" id="keep-details" hidden>
+            <div class="kinds">
+              <label class="check"><input type="checkbox" name="kind" value="links" checked> Websites &amp; links</label>
+              <label class="check"><input type="checkbox" name="kind" value="phones"> Phone numbers</label>
+              <label class="check"><input type="checkbox" name="kind" value="emails"> Email addresses</label>
+              <label class="check"><input type="checkbox" name="kind" value="dates"> Dates &amp; times</label>
+              <label class="check"><input type="checkbox" name="kind" value="money"> Money amounts</label>
+            </div>
+            <label class="field">
+              <span>Also find lines that mention…</span>
+              <input type="text" id="opt-keywords" placeholder="Words or names, separated by commas (optional), e.g. loan, deadline">
+            </label>
+          </div>
+        </fieldset>
         <label class="field">
           <span>Document title</span>
           <input type="text" id="opt-title" placeholder="Leave blank to pick one automatically">
         </label>
-        <label class="field">
+        <label class="field" id="layout-field">
           <span>Organize the document</span>
           <select id="opt-layout">
             <option value="per-screenshot">Automatic: a section per topic, scrolling captures joined</option>
