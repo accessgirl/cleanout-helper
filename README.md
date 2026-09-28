@@ -1,5 +1,7 @@
 # Screenshot to Document
 
+> **Also in this repository: [File Organizer](file-organizer/README.md)**, an Android app that sorts every file on your phone into clear folders, renames unclear files based on what's inside them, gathers duplicates for review, and puts an index at the top of every folder.
+
 Upload one or many screenshots. The app reads the writing in them (OCR) and builds **one organized document** you can download as **Word (.docx), PDF, web page (.html), Markdown (.md) or plain text (.txt)**.
 
 🔒 Everything runs in your browser. Screenshots are never uploaded to a server.
