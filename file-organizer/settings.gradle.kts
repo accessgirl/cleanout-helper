@@ -39,6 +39,9 @@ val hasAndroidSdk = listOfNotNull(
     sdkFromProperties,
 ).any { file(it).isDirectory }
 
+// Read by build.gradle.kts to decide whether to load the Android plugin.
+System.setProperty("fileorganizer.hasAndroidSdk", hasAndroidSdk.toString())
+
 if (hasAndroidSdk) {
     include(":app")
 } else {

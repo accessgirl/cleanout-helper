@@ -124,8 +124,10 @@ class Planner(
 
         // For each group, keep one copy: one already organized, else the best-named, oldest one.
         val keeperOf = HashMap<File, File>()
+        val reviewFolder = File(outputRoot, Placement.DUPLICATES_FOLDER).path + File.separator
         for (group in groups) {
-            val keeper = group.firstOrNull { it in existingSet }
+            // Prefer the copy already filed in its proper place over copies waiting in the review folder.
+            val keeper = group.filter { it in existingSet }.minByOrNull { if (it.path.startsWith(reviewFolder)) 1 else 0 }
                 ?: group.sortedWith(
                     compareByDescending<File> { Names.isMeaningful(it.nameWithoutExtension) }
                         .thenBy { Names.stripCopySuffix(it.nameWithoutExtension).length != it.nameWithoutExtension.length }
