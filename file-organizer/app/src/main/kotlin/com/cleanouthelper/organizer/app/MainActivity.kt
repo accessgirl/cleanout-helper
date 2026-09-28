@@ -206,7 +206,7 @@ class MainActivity : Activity() {
                     return@button
                 }
                 settings.save(options)
-                settings.chosenFolders = chosen
+                settings.chosenFolders = chosen.toSet()
                 settings.includeLooseFiles = loose
                 if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                     requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
