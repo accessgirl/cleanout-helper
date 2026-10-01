@@ -1,0 +1,51 @@
+name: Build File Organizer (Android app)
+
+on:
+  push:
+    paths:
+      - "file-organizer/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    paths:
+      - "file-organizer/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: file-organizer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Test the organizing logic
+        run: ./gradlew :core:test --no-daemon
+      - name: Build the app
+        run: ./gradlew :app:assembleRelease --no-daemon
+      - name: Name the APK
+        run: cp app/build/outputs/apk/release/app-release.apk FileOrganizer.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FileOrganizer-apk
+          path: file-organizer/FileOrganizer.apk
+      # On the main branch, publish the APK as a download you can open straight from your phone.
+      - name: Publish download
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: file-organizer-latest
+          name: File Organizer (latest)
+          make_latest: true
+          body: |
+            Open this page on your Android phone and tap **FileOrganizer.apk** to download it, then open the download to install.
+            See the README for step-by-step instructions.
+          files: file-organizer/FileOrganizer.apk
